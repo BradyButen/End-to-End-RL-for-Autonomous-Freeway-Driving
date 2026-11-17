@@ -23,8 +23,8 @@ Edit `#SBATCH --account=TODO_ACCOUNT` in `slurm/*.sbatch` to your account.
 ```bash
 srun --account=<acct> --partition=gpu --gres=gpu:1 --cpus-per-task=8 --time=00:30:00 --pty bash
 source .venv/bin/activate && export SDL_VIDEODRIVER=dummy && unset PYTHONPATH
-python scripts/profile_timing.py --threads 2                     # per-decision time breakdown + PPO update time
-python scripts/benchmark_throughput.py --n-envs 4 8 16 --decisions 150
+python tests/profile_timing.py --threads 2                     # per-decision time breakdown + PPO update time
+python tests/benchmark_throughput.py --n-envs 4 8 16 --decisions 150
 ```
 Use the numbers to set `training.total_control_steps`, `training.n_envs`, and `--time`.
 

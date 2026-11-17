@@ -34,5 +34,5 @@ python -m metadrive.pull_asset
 # Smoke: imports + unit tests (no simulator) + one headless MetaDrive episode
 SDL_VIDEODRIVER=dummy python -c "import torch; print('torch', torch.__version__, 'cuda', torch.cuda.is_available())"
 pytest -q
-SDL_VIDEODRIVER=dummy python scripts/validate.py --check smoke
+SDL_VIDEODRIVER=dummy python tests/validate.py --check smoke
 echo "Setup done: source $VENV/bin/activate"

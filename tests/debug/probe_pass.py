@@ -1,6 +1,6 @@
 import sys
 import numpy as np
-import os; sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "tests"))
+import os; sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "unit"))
 from conftest import KinematicPlant
 
 from handoff.config import kmh, load_config

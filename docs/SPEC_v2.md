@@ -197,8 +197,8 @@ Unchanged (YAML merge base → scenario → method → reward → CLI `--set`; m
 
 ## 15. Repository layout
 As v1.0 with package `handoff`, plus **[v2]** `methods/m3/corridor.py`, `methods/common/actuation.py`,
-`methods/m3/spline.py`, `scripts/validate.py`, `scripts/profile_timing.py`, `scripts/calibrate_actuation.py`,
-`scripts/debug/`, `slurm/`, `docs/`.
+`methods/m3/spline.py`, `tests/validate.py`, `tests/profile_timing.py`, `scripts/calibrate_actuation.py`,
+`tests/debug/`, `slurm/`, `docs/`.
 
 ## 16. Interface contracts
 As v1.0. **[v2]** Additions: `CorridorBuilder.build(ego, reference, objects, road) -> Tube` (half-spaces `A`, `b`,
@@ -206,7 +206,7 @@ corners, initial trajectory per stage); `project_waypoints` keeps the v1.0 signa
 validity and footprints).
 
 ## 17. Validation requirements (before any RL training)
-Unchanged list; implemented in `scripts/validate.py` (+ unit tests). Current results: [STATUS.md](STATUS.md).
+Unchanged list; implemented in `tests/validate.py` (+ unit tests). Current results: [STATUS.md](STATUS.md).
 
 ## 18. Reach goals
 Unchanged: adaptive MPC under dynamics mismatch (now a config change via D-03), robustness across traffic scenarios,

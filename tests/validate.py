@@ -2,8 +2,8 @@
 """Validation suite (spec §17) against the real simulator. One MetaDrive per process, so each check runs in
 its own subprocess when invoked with --all.
 
-    python scripts/validate.py --all                 # every check, report in runs/validation/
-    python scripts/validate.py --check env           # one check in-process
+    python tests/validate.py --all                 # every check, report in runs/validation/
+    python tests/validate.py --check env           # one check in-process
 
 Checks:
   env          scenario spawns as specified; ego dynamics pinned; RoadFrame round-trips on the MetaDrive map;
@@ -14,7 +14,7 @@ Checks:
   smoke        §17.6 each wrapper (m1/m2/m3) runs complete episodes with random actions; logs valid
   b0           §17.7 B0 completes evaluation episodes through the harness (all eval seeds)
   train_plumbing  SB3 PPO entry point runs end-to-end for a few hundred control steps (plumbing only)
-(§17.2 throughput: scripts/benchmark_throughput.py; §17.5 safe-set: pytest tests/test_controllers.py)
+(§17.2 throughput: tests/benchmark_throughput.py; §17.5 safe-set: pytest tests/unit/test_controllers.py)
 """
 
 import argparse

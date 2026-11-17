@@ -2,8 +2,8 @@
 """Quick CPU timing profile per method: where does the time go in one RL decision, and how long does a PPO
 update take? Single env, single process, random-init PPO policy (no learning).
 
-    python scripts/profile_timing.py                       # m1 m2 m3, 50 decisions each
-    python scripts/profile_timing.py --methods m3 --decisions 20 --scenario freeway_dense
+    python tests/profile_timing.py                       # m1 m2 m3, 50 decisions each
+    python tests/profile_timing.py --methods m3 --decisions 20 --scenario freeway_dense
 
 Per decision it splits wall time into:
   policy   PPO policy forward pass (CNN on the BEV + MLP)

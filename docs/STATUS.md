@@ -25,7 +25,7 @@
 | 7 B0 through the harness (`--check b0`) | **pass** | 20 eval seeds, `freeway_pass`: success 85 %, off-road 15 %, collision 0 %, mean 63.7 km/h, 50.7 s to complete |
 | train plumbing (`--check train_plumbing`) | **pass** | `train.py` end-to-end for M1/M2/M3 (vec envs, callbacks, eval subprocess, checkpoints, CSVs) — a few hundred steps, no real learning |
 
-Reports: `runs/validation/*.json` (regenerate with `python scripts/validate.py --all`).
+Reports: `runs/validation/*.json` (regenerate with `python tests/validate.py --all`).
 
 ## 3. Open issues for review (not tuned — left for the team)
 1. **M3 hits a stopped car** in the MPC standalone check (waypoints straight through it, projection off): the corridor's
@@ -33,7 +33,7 @@ Reports: `runs/validation/*.json` (regenerate with `python scripts/validate.py -
    collides at 3.9 m/s. Also one M3 random-action smoke episode ended in a collision. With hard constraints this
    points at a corridor/MPC issue (candidates: the car entering the 50 m perception range late relative to the
    4 m/s² planning decel, stage-0/rebuild infeasibility → fallback, box growth when the trajectory point is blocked).
-   Debug with `scripts/debug/probe_mpc_md.py stopped`.
+   Debug with `tests/debug/probe_mpc_md.py stopped`.
 2. **PID tracking** exceeds the stated tolerances during lane changes (§2).
 3. **MPC weights** are first guesses; no systematic tuning.
 4. **B0 off-road 15 %**: MetaDrive's IDM lane changes into lane 0 overshoot at 70 km/h (heading 8–11°) and touch the
@@ -47,7 +47,7 @@ Reports: `runs/validation/*.json` (regenerate with `python scripts/validate.py -
 
 ## 4. Performance (dev machine, random actions, BEV on)
 
-`scripts/benchmark_throughput.py` (control steps per wall second / simulated seconds per wall second):
+`tests/benchmark_throughput.py` (control steps per wall second / simulated seconds per wall second):
 
 | method | 1 env | 4 envs | 8 envs |
 |---|---|---|---|
@@ -63,7 +63,7 @@ down — possibly per-worker thread oversubscription in the numerical libraries;
 be measured there before setting budgets — the earlier per-run estimates (M1 ≈ 1 h, M2 ≈ 0.4 h, M3 ≈ 0.75 h on a
 16-core GPU node) assumed linear scaling and are optimistic.
 
-`scripts/profile_timing.py` (1 env): ms per control step M1 5.7, M2 3.7, M3 9.2; one PPO update on a 256-decision
+`tests/profile_timing.py` (1 env): ms per control step M1 5.7, M2 3.7, M3 9.2; one PPO update on a 256-decision
 buffer ≈ 1.6 s on one CPU thread (≈ 6.3 ms per decision — dominates M1 on CPU; the GPU removes most of it).
 
 ## 5. Untested

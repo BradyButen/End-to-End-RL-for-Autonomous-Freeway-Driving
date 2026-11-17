@@ -4,7 +4,7 @@ observation on) at a chosen number of parallel envs, plus the MPC solve-time dis
 
 Uses SubprocVecEnv with random actions — the same process layout as training, without learning.
 
-    python scripts/benchmark_throughput.py --n-envs 1 4 8 --decisions 300
+    python tests/benchmark_throughput.py --n-envs 1 4 8 --decisions 300
 """
 
 import argparse

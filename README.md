@@ -29,9 +29,9 @@ makes the 3D viewer use the GPU (otherwise it renders in software).
 ## Common commands
 ```bash
 pytest                                              # unit tests (no simulator, ~30 s)
-python scripts/validate.py --all                    # spec §17 checks against MetaDrive -> runs/validation/
-python scripts/profile_timing.py                    # where the time goes per decision + PPO update cost
-python scripts/benchmark_throughput.py --n-envs 1 4 # steps/s per method
+python tests/validate.py --all                    # spec §17 checks against MetaDrive -> runs/validation/
+python tests/profile_timing.py                    # where the time goes per decision + PPO update cost
+python tests/benchmark_throughput.py --n-envs 1 4 # steps/s per method
 
 python scripts/view.py live --method b0 --scenario freeway_dense          # watch (needs a display)
 python scripts/view.py live --method m3 --checkpoint <run>/checkpoints/best.zip
@@ -58,8 +58,12 @@ src/handoff/
     m2/         wrapper.py, trajectory.py (quintic + speed profile), pid.py
     m3/         wrapper.py, safe_set.py -> spline.py -> corridor.py -> mpc.py (pipeline order)
   rewards/ · rl/ (training) · eval/ · logging/ · viz/ · config.py
-scripts/        train, evaluate, validate, benchmark, profile, view, plot, calibrate; debug/ probes
+scripts/        tools you use: train, evaluate, view, plot, calibrate_actuation
 slurm/          Great Lakes setup + job scripts
-tests/          pytest unit tests (kinematic plant stands in for MetaDrive)
+tests/          everything that checks the code:
+  unit/         pytest unit tests (kinematic plant stands in for MetaDrive)
+  validate.py   simulator checks (env, pid, mpc, smoke, b0, train_plumbing)
+  benchmark_throughput.py, profile_timing.py   speed measurements
+  debug/        MPC diagnostic probes
 runs/           outputs (git-ignored)
 ```

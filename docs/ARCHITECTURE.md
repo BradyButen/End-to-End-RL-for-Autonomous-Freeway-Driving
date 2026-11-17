@@ -151,9 +151,9 @@ Plain YAML merged in order `configs/base.yaml → scenario/<s> → method/<m> �
 | `reward/*.yaml` | reward weights and terminal mode |
 
 ## 9. Tests and tools
-* `tests/` (pytest, no simulator): config, RoadFrame, scenario, metrics, rewards, trajectory, PID, spline, safe set,
+* `tests/unit/` (pytest, no simulator): config, RoadFrame, scenario, metrics, rewards, trajectory, PID, spline, safe set,
   MPC + fallback chain on a kinematic plant.
-* `scripts/validate.py`: spec §17 checks against MetaDrive (`--check env|pid|mpc|smoke|b0|train_plumbing`, `--all`).
-* `scripts/benchmark_throughput.py`, `scripts/profile_timing.py`: throughput / time breakdown.
+* `tests/validate.py`: spec §17 checks against MetaDrive (`--check env|pid|mpc|smoke|b0|train_plumbing`, `--all`).
+* `tests/benchmark_throughput.py`, `tests/profile_timing.py`: throughput / time breakdown.
 * `scripts/calibrate_actuation.py`: re-measures the throttle/brake table and steering response.
-* `scripts/debug/`: per-step printouts of MPC scenarios (stopped car, pass lead, prediction vs MetaDrive).
+* `tests/debug/`: per-step printouts of MPC scenarios (stopped car, pass lead, prediction vs MetaDrive).

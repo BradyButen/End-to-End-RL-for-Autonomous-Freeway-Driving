@@ -28,7 +28,7 @@ dev = ["pytest>=8", "ruff>=0.5"]
 where = ["src"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests/unit"]
 markers = [
     "sim: tests that start a MetaDrive instance (slower; one MetaDrive per process)",
 ]
@@ -36,7 +36,7 @@ addopts = "-q"
 
 [tool.ruff]
 line-length = 120
-extend-exclude = ["scripts/debug"]
+extend-exclude = ["tests/debug"]
 target-version = "py310"
 
 [tool.ruff.lint]

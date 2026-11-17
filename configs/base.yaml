@@ -1,0 +1,100 @@
+# Base configuration. Merge order (spec §14):
+#   base.yaml -> scenario/<s>.yaml -> method/<m>.yaml -> reward/<r>.yaml -> CLI overrides (key.sub=value)
+
+experiment:
+  method: m1               # set by method/<m>.yaml
+  reward_variant: r0       # set by reward/<r>.yaml
+  scenario: freeway_pass   # set by scenario/<s>.yaml
+  seed: 0                  # training seed (PPO init + training-episode seed stream)
+  runs_root: runs
+
+sim:
+  physics_world_step_size: 0.02
+  decision_repeat: 5        # control step = 0.1 s
+  control_dt: 0.1
+  horizon: 1200             # control steps before timeout (truncated); 120 s
+  on_continuous_line_done: true
+  log_level: 50             # MetaDrive logging (50 = CRITICAL only)
+  metadrive_overrides:
+    # Destroy objects on reset instead of reusing MetaDrive's object buffer: makes physics bit-exact across
+    # episodes in one process (reused objects carry ~1e-5 m state noise that closed loops amplify), which
+    # deterministic replay relies on. DECISIONS D-11.
+    force_destroy: true
+  map:
+    lane_num: 3
+    lane_width: 3.5
+    first_block_length: 50  # MetaDrive FirstPGBlock ("exit_length")
+    straight_block_lengths: [240.0, 240.0, 240.0, 240.0]   # pinned; total route 1010 m
+    one_way: true           # no oncoming carriageway (MetaDrive blocks are two-way by default)
+  ego:
+    # Pinned dynamics (spec §4.4). MetaDrive randomizes engine/brake per spawn by default.
+    max_engine_force: 800
+    max_brake_force: 150
+    max_steering_deg: 40
+    wheel_friction: 0.9
+    max_speed_km_h: 80
+    front_wheelbase: 1.05234
+    rear_wheelbase: 1.4166
+    length: 4.515
+    width: 1.852
+  perception_range: 50.0    # R, metres; ObjectList radius
+  target_speed_km_h: 70     # global target speed
+  v_cap_km_h: 80            # speed cap (M2 action range, M3 MPC constraint)
+
+observation:
+  bev:
+    resolution: 84
+    # MetaDrive "distance" is the SIDE LENGTH of the ego-centred square window, so 100 m => +/-50 m = R.
+    distance: 100.0
+    frame_stack: 3
+    post_stack: 5
+    frame_skip: 5
+  ego_features: [v, d, psi_err, steering, throttle_brake]
+
+# Actuation mapping a [m/s^2] -> throttle_brake (used by M3's MPC; spec §19 "no sys-ID").
+# Static lookup table measured once with scripts/calibrate_actuation.py (open-loop full/partial
+# throttle and brake on the bare map). Pairs are (throttle_brake, longitudinal accel m/s^2), sorted.
+actuation:
+  # Measured at 15 m/s, 2026-11-16. Positive throttle is linear (a = 2.909 u, no drag); u = 0 exactly coasts at
+  # -0.36 m/s^2 (parking brake 2.0 applied), so a tiny positive point is included to map a = 0 -> u ~ 0.0125.
+  table:
+    - [-1.0, -15.805]
+    - [-0.6, -11.703]
+    - [-0.3, -7.936]
+    - [-0.15, -4.091]
+    - [-0.05, -1.364]
+    - [0.0, -0.364]
+    - [0.02, 0.058]
+    - [1.0, 2.909]
+
+logging:
+  full_log_eval: true
+  train_full_log_every: 50     # every Nth training episode per env gets full control/decision logs
+  max_logged_objects: 10
+
+eval:
+  n_episodes: 20
+  n_workers: 1                 # parallel evaluation subprocesses (one MetaDrive each); raise on clusters
+  freq_control_steps: 25000    # evaluate every N control steps (summed over envs)
+  deterministic: true
+
+training:
+  total_control_steps: 2000000
+  n_envs: 4
+  checkpoint_freq_control_steps: 100000
+  device: auto                 # "auto" = cuda if available else cpu; or "cpu" / "cuda" / "cuda:0"
+  torch_threads: null          # CPU threads for PPO updates in the main process (null = torch default)
+  gamma_ref: 0.99              # per-0.1 s discount; gamma_method = gamma_ref ** (T_decision / 0.1)
+
+ppo:                           # SB3 PPO kwargs (defaults unless overridden in method/*.yaml)
+  learning_rate: 0.0003
+  n_steps: 2048
+  batch_size: 64
+  n_epochs: 10
+  gae_lambda: 0.95
+  clip_range: 0.2
+  ent_coef: 0.0
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  policy_kwargs:
+    normalize_images: false

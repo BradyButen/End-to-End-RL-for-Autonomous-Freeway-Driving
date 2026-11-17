@@ -1,0 +1,21 @@
+# R2 (example variant, exploration topic): R0 + speed tracking + lane keeping + comfort terms.
+# Weights are first guesses, not tuned.
+experiment:
+  reward_variant: r2_dense_comfort
+
+reward:
+  name: r2_dense_comfort
+  terminal_mode: replace
+  terminal_priority: [success, off_road, collision]
+  weights:
+    progress: 1.0
+    speed: 0.1
+    success: 10.0
+    off_road: -5.0
+    collision: -5.0
+    speed_tracking: 0.2
+    lane_center: 0.1
+    jerk: 0.005
+    steer_rate: 0.05
+    time: 0.0
+    projection_penalty: 0.1

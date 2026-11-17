@@ -1,0 +1,23 @@
+# R0: re-implementation of MetaDrive's default MetaDriveEnv reward (spec §9.3).
+# Per step: 1.0 * progress (Δs, m) + 0.1 * speed (v / v_max).
+# On termination the step reward is REPLACED by the first active terminal term in priority
+# order success > off_road > collision (MetaDrive semantics).
+experiment:
+  reward_variant: r0
+
+reward:
+  name: r0
+  terminal_mode: replace       # replace | add
+  terminal_priority: [success, off_road, collision]
+  weights:
+    progress: 1.0
+    speed: 0.1
+    success: 10.0
+    off_road: -5.0
+    collision: -5.0
+    speed_tracking: 0.0
+    lane_center: 0.0
+    jerk: 0.0
+    steer_rate: 0.0
+    time: 0.0
+    projection_penalty: 0.0

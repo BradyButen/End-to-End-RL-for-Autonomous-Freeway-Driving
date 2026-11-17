@@ -1,0 +1,62 @@
+# M3: RL picks up to 5 sparse Frenet waypoints; safe-set projection; spline; MPC with collision avoidance.
+experiment:
+  method: m3
+
+method:
+  name: m3
+  decision_period: 10          # N3 control steps (1.0 s); fixed-period trigger (DECISIONS D-04)
+  n_slots: 5
+  ds_range: [5.0, 40.0]        # per-slot Δs (m)
+  lateral_margin: 1.0
+  safe_set:
+    enabled: true              # false only for diagnostics (MPC-standalone validation)
+    edge_margin: 0.2           # extra clearance to road edge beyond ego half-width (m)
+    obj_margin_s: 2.0          # longitudinal inflation of object footprints (m)
+    obj_margin_d: 0.5          # lateral inflation (m)
+    time_uncertainty: 0.5      # footprint swept over ±τ s around predicted arrival time
+    min_speed_for_timing: 5.0  # m/s, floor on ego speed when predicting arrival time
+    max_slope: 0.16            # max |Δd|/Δs between consecutive waypoints (reachability)
+    max_lat_accel: 3.0         # m/s^2; |Δd| <= a_lat·Δs²/(5.77 v²) (exact for the quintic spline segments)
+    reach_time: 10.0           # waypoint s must be within s_ego + v_cap * reach_time
+    min_ds: 2.0                # waypoints stay strictly increasing in s by at least this
+    infeasible_penalty_distance: 10.0   # projection distance charged per dropped waypoint (m)
+  spline:
+    ds: 1.0                    # path sample spacing (m)
+    extend: 80.0               # path is extended flat beyond the last waypoint (m)
+  mpc:
+    horizon: 20                # N
+    steer_lag: 0.1             # s, first-order wheel-angle lag in the MPC model (measured)
+    dt: 0.1
+    weights:
+      lateral: 2.0
+      heading: 2.0
+      speed: 0.5
+      steer: 1.0
+      accel: 0.05
+      steer_rate: 20.0
+      accel_rate: 0.5
+      terminal_factor: 3.0
+    accel_bounds: [-6.0, 2.5]  # m/s^2
+    max_lat_accel: 4.0         # m/s^2, |v² tan(δ)/L| bound
+    max_fallback_shift: 5      # replay at most this many steps of a stale plan, then emergency brake
+    steer_rate_limit: 0.6      # rad/s
+    corridor:                  # hard convex tube: 4 half-spaces per stage on the ego centre (DECISIONS D-13)
+      horizon: 3.0             # s; must cover MPC horizon + rebuild period
+      rebuild_period: 10       # control steps between tube rebuilds (also rebuilt on every new RL reference)
+      margin_s: 1.0            # car inflation beyond ego half-length (m)
+      margin_d: 0.3            # car inflation beyond ego half-width (m)
+      edge_margin: 0.1         # road edge clearance beyond ego half-width (m)
+      cap_forward: 20.0        # max box extent ahead of / behind / beside the trajectory point (m)
+      cap_backward: 10.0
+      cap_lateral: 5.25
+      lane_change_heading: 0.035   # rad; above this the box follows the trajectory heading
+      accel: 2.0               # initial-trajectory speed profile limits (m/s^2)
+      brake: 4.0
+      stop_buffer: 2.0         # stop this far behind the inflated footprint of a blocking car (m)
+    solver:
+      max_iter: 100
+      max_cpu_time: 0.1        # IPOPT CPU limit (s); exceeding -> fallback
+      tol: 0.001
+      print_level: 0
+
+ppo: {}

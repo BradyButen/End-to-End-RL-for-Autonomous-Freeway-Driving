@@ -1,0 +1,8 @@
+# B0: MetaDrive rule-based IDMPolicy drives the ego (car following + lane changes). Evaluation only.
+experiment:
+  method: b0
+
+method:
+  name: b0
+  decision_period: 1
+  idm_lane_change: true

@@ -1,0 +1,9 @@
+# M1: end-to-end. RL outputs [steering, throttle_brake] every control step.
+experiment:
+  method: m1
+
+method:
+  name: m1
+  decision_period: 1           # control steps per RL decision
+
+ppo: {}

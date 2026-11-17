@@ -4,11 +4,11 @@ import os; sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "uni
 from conftest import KinematicPlant
 
 from handoff.config import kmh, load_config
-from handoff.methods.common.actuation import ActuationMap
-from handoff.methods.m3.mpc import MPCController
-from handoff.methods.m3.spline import build_m3_reference
-from handoff.sim.road import RoadFrame
-from handoff.sim.state import make_tracked_object
+from handoff.rl.methods.common import ActuationMap
+from handoff.rl.methods.m3_mpc import MPCController
+from handoff.rl.methods.m3_spline import build_m3_reference
+from handoff.simulator.road import RoadFrame
+from handoff.simulator.state import make_tracked_object
 
 cfg = load_config("m3", overrides=sys.argv[1:])
 road = RoadFrame.straight(1000); act = ActuationMap(cfg["actuation"]["table"])

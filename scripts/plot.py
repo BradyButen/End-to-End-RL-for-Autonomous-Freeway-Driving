@@ -8,7 +8,7 @@
 
 import argparse
 
-from handoff.viz.plots import comparison_table, episode_timeseries, learning_curves
+from handoff.simulator.plots import comparison_table, episode_timeseries, learning_curves
 
 
 def main():

@@ -39,7 +39,7 @@ PID_TOL_SPEED = 0.5          # m/s, speed error once settled
 
 # ----------------------------------------------------------------------------------------------- helpers
 def _spec(ego_lane=1, ego_s=80.0, ego_v=18.0, lead_lane=1, lead_s=None, lead_v=0.0, lead_model="xl", bg=()):
-    from handoff.sim.scenario import ScenarioSpec, VehicleSpec
+    from handoff.simulator.scenario import ScenarioSpec, VehicleSpec
 
     lead = VehicleSpec(lane=lead_lane, s=lead_s if lead_s is not None else 990.0, speed=lead_v, model=lead_model,
                        role="lead")
@@ -56,7 +56,7 @@ class _FixedScenario:
 
 
 def _env_with_spec(method, spec, overrides=(), run_dir=None):
-    from handoff.env.factory import make_env
+    from handoff.rl.env.factory import make_env
 
     cfg = load_config(method, overrides=list(overrides))
     env = make_env(cfg, is_eval=True, run_dir=run_dir)
@@ -66,7 +66,7 @@ def _env_with_spec(method, spec, overrides=(), run_dir=None):
 
 def _all_traffic(core, role=None):
     """TrackedObjects for every traffic vehicle (no range limit)."""
-    from handoff.sim.state import make_tracked_object
+    from handoff.simulator.state import make_tracked_object
 
     out = []
     for v in core.md.engine.traffic_manager._traffic_vehicles:
@@ -80,8 +80,8 @@ def _all_traffic(core, role=None):
 
 # ----------------------------------------------------------------------------------------------- checks
 def check_env() -> dict:
-    from handoff.env.factory import make_env
-    from handoff.sim.metadrive_env import geometric_off_road
+    from handoff.rl.env.factory import make_env
+    from handoff.simulator.metadrive_env import geometric_off_road
 
     cfg = load_config("m1")
     env = make_env(cfg, is_eval=True)
@@ -163,7 +163,7 @@ def check_env() -> dict:
 
 
 def _determinism() -> dict:
-    from handoff.env.factory import make_env
+    from handoff.rl.env.factory import make_env
 
     cfg = load_config("m3")
     env = make_env(cfg, is_eval=True)
@@ -296,10 +296,10 @@ def check_mpc() -> dict:
 
 
 def check_smoke(n_episodes: int = 2) -> dict:
-    from handoff.env.factory import make_env
-    from handoff.logging.recorder import load_episode
-    from handoff.logging.run_dir import CsvAppender
-    from handoff.rewards.terms import TERM_NAMES
+    from handoff.rl.env.factory import make_env
+    from handoff.rl.env.rewards import TERM_NAMES
+    from handoff.rl.records.recorder import load_episode
+    from handoff.rl.records.run_dir import CsvAppender
 
     out = {}
     tmp = OUT / "smoke"
@@ -311,7 +311,7 @@ def check_smoke(n_episodes: int = 2) -> dict:
         sums = []
         t0 = time.time()
         for ep in range(n_episodes):
-            env.reset(options={"episode_seed": 1000000 + ep})
+            env.reset(options={"episode_seed": cfg["scenario"]["seeds"]["eval"][ep]})
             while True:
                 _, r, te, tr, info = env.step(rng.uniform(-1, 1, env.action_space.shape))
                 assert np.isfinite(r)

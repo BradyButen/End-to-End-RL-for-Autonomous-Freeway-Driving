@@ -1,17 +1,16 @@
-"""Unit tests without the simulator: config, RoadFrame, state helpers, scenario sampling, metrics, actuation."""
+"""Unit tests without the simulator: config, RoadFrame, state helpers, metrics, actuation."""
 
 import numpy as np
 import pytest
 
 from handoff.config import deep_merge, load_config, parse_override
-from handoff.env.decision import affine
-from handoff.env.factory import method_gamma
-from handoff.eval.metrics import count_lane_changes, episode_metrics, termination_reason
-from handoff.methods.common.actuation import ActuationMap
-from handoff.methods.m3.wrapper import waypoint_count
-from handoff.sim.road import RoadFrame
-from handoff.sim.scenario import VEHICLE_LENGTHS, FreewayPassScenario
-from handoff.sim.state import frenet_box_gap, make_ego_state, make_tracked_object, time_to_collision
+from handoff.rl.env.decision import affine
+from handoff.rl.env.factory import method_gamma
+from handoff.rl.eval.metrics import count_lane_changes, episode_metrics, termination_reason
+from handoff.rl.methods.common import ActuationMap
+from handoff.rl.methods.m3_main import waypoint_count
+from handoff.simulator.road import RoadFrame
+from handoff.simulator.state import frenet_box_gap, make_ego_state, make_tracked_object, time_to_collision
 
 
 # ----------------------------------------------------------------------------- config
@@ -30,7 +29,6 @@ def test_load_config_merge_order():
     assert cfg["experiment"]["method"] == "m3"
     assert cfg["experiment"]["reward_variant"] == "r0"
     assert cfg["method"]["decision_period"] == 7
-    assert cfg["sim"]["ego"]["max_engine_force"] == 800
     assert set(cfg["scenario"]["seeds"]["eval"]).isdisjoint(range(cfg["scenario"]["seeds"]["train_low"],
                                                                   cfg["scenario"]["seeds"]["train_high"]))
 
@@ -83,24 +81,6 @@ def test_ego_state_and_gap(road):
     assert ttc == pytest.approx(gap / closing, rel=1e-3)
     side = make_tracked_object("b", 100, 0.0, 0.0, 25, 0, 4.5, 1.85, "bg", road)
     assert np.isinf(time_to_collision(ego, side, road))
-
-
-# ----------------------------------------------------------------------------- scenario
-def test_scenario_sampling(cfg_m3):
-    sc = FreewayPassScenario(cfg_m3["scenario"], lane_num=3)
-    for seed in range(50):
-        spec = sc.sample(np.random.default_rng(seed), seed)
-        c = cfg_m3["scenario"]
-        assert spec.lead.lane == spec.ego.lane
-        gap = spec.lead.s - spec.ego.s - 0.5 * (VEHICLE_LENGTHS["default"] + VEHICLE_LENGTHS["xl"])
-        assert c["lead"]["gap"][0] - 1e-9 <= gap <= c["lead"]["gap"][1] + 1e-9
-        assert c["lead"]["speed_km_h"][0] / 3.6 - 1e-9 <= spec.lead.speed <= c["lead"]["speed_km_h"][1] / 3.6 + 1e-9
-        assert len(spec.background) <= c["background"]["count"][1]
-        if c["background"].get("lanes", "other") == "other":
-            for b in spec.background:
-                assert b.lane != spec.ego.lane
-        # deterministic per seed
-        assert sc.sample(np.random.default_rng(seed), seed).as_dict() == spec.as_dict()
 
 
 # ----------------------------------------------------------------------------- decoding

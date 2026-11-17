@@ -13,8 +13,8 @@ import argparse
 import numpy as np
 
 from handoff.config import load_config
-from handoff.sim.metadrive_env import FreewayMetaDriveEnv, make_metadrive_config
-from handoff.sim.scenario import ScenarioSpec, VehicleSpec
+from handoff.simulator.metadrive_env import FreewayMetaDriveEnv, make_metadrive_config
+from handoff.simulator.scenario import ScenarioSpec, VehicleSpec
 
 LEVELS = [-1.0, -0.6, -0.3, -0.15, -0.05, 0.0, 0.25, 0.5, 1.0]
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """MetaDrive viewer with overlays (spec §13). Needs a display (WSLg / X11); training always runs headless.
 
-Live:    python scripts/view.py live --method m3 --checkpoint .../best.zip --seeds 1000000 1000001
+Live:    python scripts/view.py live --method m3 --checkpoint .../best.zip --seeds 1000 1001
          python scripts/view.py live --method b0
 Replay:  python scripts/view.py replay --episode runs/.../episodes/<id>.npz --checkpoint .../best.zip
 Plots:   see scripts/plot.py
@@ -24,7 +24,7 @@ def main():
         sp.add_argument("--set", dest="overrides", action="append", default=[])
     lv.add_argument("--method", required=True, choices=["m1", "m2", "m3", "b0"])
     lv.add_argument("--reward", default="r0")
-    lv.add_argument("--scenario", default="freeway_pass")
+    lv.add_argument("--scenario", default="freeway")
     lv.add_argument("--seeds", nargs="+", type=int, default=None)
     rp.add_argument("--episode", required=True, help="logged episode .npz")
     rp.add_argument("--config", default=None, help="run config.yaml (default: inferred from the episode path)")
@@ -40,7 +40,7 @@ def main():
     import yaml
 
     from handoff.config import deep_merge, load_config, parse_override
-    from handoff.viz.viewer import live, replay
+    from handoff.simulator.viewer import live, replay
 
     if args.mode == "live":
         cfg = load_config(args.method, args.reward, args.scenario, args.overrides)

@@ -2,7 +2,7 @@
 # Final evaluation of a checkpoint (or B0) on the 20 fixed evaluation seeds. CPU only.
 #
 #   sbatch --export=ALL,METHOD=m3,CKPT=runs/m3/r0/seed_0/<ts>/checkpoints/best.zip slurm/evaluate.sbatch
-#   sbatch --export=ALL,METHOD=b0,SCENARIO=freeway_dense slurm/evaluate.sbatch
+#   sbatch --export=ALL,METHOD=b0,SCENARIO=freeway slurm/evaluate.sbatch
 #
 #SBATCH --job-name=handoff-eval
 #SBATCH --account=TODO_ACCOUNT
@@ -16,7 +16,7 @@
 
 set -euo pipefail
 METHOD="${METHOD:?set METHOD}"
-SCENARIO="${SCENARIO:-freeway_pass}"
+SCENARIO="${SCENARIO:-freeway}"
 cd "${SLURM_SUBMIT_DIR:-$(pwd)}"
 module load "${PY_MODULE:-python/3.12}"
 source "${VENV:-.venv}/bin/activate"

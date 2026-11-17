@@ -4,7 +4,7 @@
 experiment:
   method: m1               # set by method/<m>.yaml
   reward_variant: r0       # set by reward/<r>.yaml
-  scenario: freeway_pass   # set by scenario/<s>.yaml
+  scenario: freeway        # set by scenario/<s>.yaml
   seed: 0                  # training seed (PPO init + training-episode seed stream)
   runs_root: runs
 
@@ -21,17 +21,17 @@ sim:
     # deterministic replay relies on. DECISIONS D-11.
     force_destroy: true
   map:
+    # MetaDrive PG block string: "S" = straight block, length drawn from the seed in [40, 80] m. 16 blocks
+    # + the first block give a straight road of roughly 1 km. Two-way (stock); crossing the centre line ends
+    # the episode (on_continuous_line_done).
+    blocks: SSSSSSSSSSSSSSSS
     lane_num: 3
     lane_width: 3.5
-    first_block_length: 50  # MetaDrive FirstPGBlock ("exit_length")
-    straight_block_lengths: [240.0, 240.0, 240.0, 240.0]   # pinned; total route 1010 m
-    one_way: true           # no oncoming carriageway (MetaDrive blocks are two-way by default)
   ego:
-    # Pinned dynamics (spec §4.4). MetaDrive randomizes engine/brake per spawn by default.
-    max_engine_force: 800
-    max_brake_force: 150
-    max_steering_deg: 40
-    wheel_friction: 0.9
+    # Stock MetaDrive default vehicle (its own fixed dynamics). Spawn: first block, random lane, fixed speed.
+    spawn_speed_km_h: 40
+    random_spawn_lane: true
+    max_steering_deg: 40      # default vehicle's max steering (used to convert steering commands to radians)
     max_speed_km_h: 80
     front_wheelbase: 1.05234
     rear_wheelbase: 1.4166

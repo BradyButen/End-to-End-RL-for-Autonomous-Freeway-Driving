@@ -4,17 +4,17 @@ import numpy as np
 import pytest
 
 from handoff.config import kmh
-from handoff.methods.m2.pid import PID, CascadedPIDController
-from handoff.methods.m2.trajectory import (
+from handoff.rl.methods.m2_pid import PID, CascadedPIDController
+from handoff.rl.methods.m2_trajectory import (
     build_m2_reference,
     eval_quintic,
     quintic_coefficients,
     speed_profile,
 )
-from handoff.methods.m3.mpc import MPCController
-from handoff.methods.m3.safe_set import project_waypoints, project_waypoints_detailed
-from handoff.methods.m3.spline import build_m3_reference
-from handoff.sim.state import make_tracked_object
+from handoff.rl.methods.m3_mpc import MPCController
+from handoff.rl.methods.m3_safe_set import project_waypoints, project_waypoints_detailed
+from handoff.rl.methods.m3_spline import build_m3_reference
+from handoff.simulator.state import make_tracked_object
 
 
 # ----------------------------------------------------------------------------- trajectory
@@ -160,7 +160,7 @@ def test_mpc_passes_slow_lead(road, plant_cls, actuation, cfg_m3):
     p = plant_cls(actuation, x=50, y=-3.5, v=18)
     lead = [90.0, -3.5, 10.0]
     min_gap, fallbacks = np.inf, 0
-    from handoff.sim.state import frenet_box_gap
+    from handoff.simulator.state import frenet_box_gap
 
     for k in range(120):
         ego = p.ego(road, t=k * 0.1)
@@ -182,7 +182,7 @@ def test_mpc_avoids_stopped_vehicle_in_path(road, plant_cls, actuation, cfg_m3):
     """Waypoints drive straight through a stopped car; the MPC's collision constraint must prevent contact."""
     mpc = _mpc(cfg_m3, road, actuation)
     p = plant_cls(actuation, x=50, y=-3.5, v=15)
-    from handoff.sim.state import frenet_box_gap
+    from handoff.simulator.state import frenet_box_gap
 
     stopped = make_tracked_object("s", 110.0, -3.5, 0.0, 0.0, 0.0, 4.5, 1.85, "bg", road)
     min_gap = np.inf

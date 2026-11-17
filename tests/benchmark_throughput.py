@@ -19,7 +19,7 @@ import numpy as np  # noqa: E402
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv  # noqa: E402
 
 from handoff.config import load_config  # noqa: E402
-from handoff.env.factory import env_factory  # noqa: E402
+from handoff.rl.env.factory import env_factory  # noqa: E402
 
 
 def bench(method: str, n_envs: int, n_decisions: int, overrides) -> dict:

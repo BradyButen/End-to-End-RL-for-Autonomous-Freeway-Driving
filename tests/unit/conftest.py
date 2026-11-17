@@ -6,8 +6,8 @@ import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 
 from handoff.config import kmh, load_config  # noqa: E402
-from handoff.methods.common.actuation import ActuationMap  # noqa: E402
-from handoff.sim.road import RoadFrame  # noqa: E402
+from handoff.rl.methods.common import ActuationMap  # noqa: E402
+from handoff.simulator.road import RoadFrame  # noqa: E402
 
 
 @pytest.fixture
@@ -57,7 +57,7 @@ class KinematicPlant:
             self.v = float(np.clip(self.v + a * h, 0.0, self.v_cap))
 
     def ego(self, road, t=0.0):
-        from handoff.sim.state import make_ego_state
+        from handoff.simulator.state import make_ego_state
 
         return make_ego_state(t, self.x, self.y, self.psi, self.v, self.steering, self.throttle, 4.515, 1.852, road)
 

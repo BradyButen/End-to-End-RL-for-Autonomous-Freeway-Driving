@@ -3,7 +3,7 @@
 update take? Single env, single process, random-init PPO policy (no learning).
 
     python tests/profile_timing.py                       # m1 m2 m3, 50 decisions each
-    python tests/profile_timing.py --methods m3 --decisions 20 --scenario freeway_dense
+    python tests/profile_timing.py --methods m3 --decisions 20 --scenario freeway
 
 Per decision it splits wall time into:
   policy   PPO policy forward pass (CNN on the BEV + MLP)
@@ -24,7 +24,7 @@ from stable_baselines3 import PPO  # noqa: E402
 from stable_baselines3.common.vec_env import DummyVecEnv  # noqa: E402
 
 from handoff.config import load_config  # noqa: E402
-from handoff.env.factory import make_env  # noqa: E402
+from handoff.rl.env.factory import make_env  # noqa: E402
 from handoff.rl.train import ppo_kwargs  # noqa: E402
 
 
@@ -97,7 +97,7 @@ def profile(method: str, scenario: str, n_dec: int, n_steps: int) -> dict:
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--methods", nargs="+", default=["m1", "m2", "m3"])
-    p.add_argument("--scenario", default="freeway_pass")
+    p.add_argument("--scenario", default="freeway")
     p.add_argument("--decisions", type=int, default=50)
     p.add_argument("--n-steps", type=int, default=256, help="decisions in the timed PPO rollout+update")
     p.add_argument("--threads", type=int, default=1, help="torch CPU threads")

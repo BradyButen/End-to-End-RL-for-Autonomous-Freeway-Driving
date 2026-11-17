@@ -2,11 +2,12 @@
 
 Merge order: base.yaml -> scenario/<s>.yaml -> method/<m>.yaml -> reward/<r>.yaml -> CLI overrides.
 CLI overrides use dotted keys: ``method.decision_period=10`` or ``ppo.learning_rate=1e-4``;
-values are parsed as YAML so lists/numbers/bools work (``sim.map.straight_block_lengths=[100,100]``).
+values are parsed as YAML so lists/numbers/bools work (``sim.map.blocks=SSSS``, ``scenario.seeds.eval=[1,2]``).
 """
 
 from __future__ import annotations
 
+import argparse
 import copy
 from pathlib import Path
 from typing import Any
@@ -58,7 +59,7 @@ def parse_override(text: str) -> dict:
 def load_config(
     method: str,
     reward: str = "r0",
-    scenario: str = "freeway_pass",
+    scenario: str = "freeway",
     overrides: list[str] | None = None,
     config_dir: str | Path | None = None,
 ) -> dict:
@@ -83,3 +84,20 @@ def save_config(cfg: dict, path: str | Path) -> None:
 def kmh(v_km_h: float) -> float:
     """km/h -> m/s."""
     return float(v_km_h) / 3.6
+
+
+# --------------------------------------------------------------------------------------- script arguments
+def add_config_args(p: argparse.ArgumentParser, method_required: bool = True) -> None:
+    p.add_argument("--method", required=method_required, choices=["m1", "m2", "m3", "b0"])
+    p.add_argument("--reward", default="r0", help="configs/reward/<name>.yaml")
+    p.add_argument("--scenario", default="freeway", help="configs/scenario/<name>.yaml")
+    p.add_argument("--seed", type=int, default=None, help="experiment.seed override")
+    p.add_argument("--set", dest="overrides", action="append", default=[], metavar="KEY=VALUE",
+                   help="dotted config override, repeatable (e.g. --set training.n_envs=8)")
+
+
+def config_from_args(args) -> dict:
+    overrides = list(args.overrides)
+    if getattr(args, "seed", None) is not None:
+        overrides.append(f"experiment.seed={args.seed}")
+    return load_config(args.method, args.reward, args.scenario, overrides)

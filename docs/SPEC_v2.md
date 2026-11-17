@@ -20,7 +20,7 @@
 | 7.2 | M2 open items resolved (N2 = 5, T_traj = 2 s, PID details) | D-04, D-16 |
 | 7.3 | M3: N3 = 10; safe-set reachability uses a lateral-acceleration budget; infeasibility rule; **MPC collision avoidance is a hard convex corridor** (was: soft constraints with slack); MPC steering-lag model + lateral-accel bound; speed reference from the corridor trajectory | D-04, D-06, D-12, D-13 |
 | 7.3 | Actuation mapping = measured static lookup table | D-12 |
-| 10 | Budgets and eval/checkpoint cadence counted in control steps; training on **Great Lakes** with GPU support | D-07, D-18 |
+| 10 | Budgets and rl/eval/checkpoint cadence counted in control steps; training on **Great Lakes** with GPU support | D-07, D-18 |
 | 12 | `force_destroy` for bit-exact re-simulation; logs also store corridor tubes | D-11 |
 | 19 | Most open decisions resolved (see §19) | — |
 | 20 | New MetaDrive pitfalls #9–#12 | D-10, D-11, D-12 |
@@ -196,8 +196,8 @@ logs). **[v2]** Overlays include corridor boxes. Analysis plots: learning curves
 Unchanged (YAML merge base → scenario → method → reward → CLI `--set`; merged config saved per run).
 
 ## 15. Repository layout
-As v1.0 with package `handoff`, plus **[v2]** `methods/m3/corridor.py`, `methods/common/actuation.py`,
-`methods/m3/spline.py`, `tests/validate.py`, `tests/profile_timing.py`, `scripts/calibrate_actuation.py`,
+As v1.0 with package `handoff`, plus **[v2]** `rl/methods/m3_corridor.py`, `rl/methods/common.py`,
+`rl/methods/m3_spline.py`, `tests/validate.py`, `tests/profile_timing.py`, `scripts/calibrate_actuation.py`,
 `tests/debug/`, `slurm/`, `docs/`.
 
 ## 16. Interface contracts

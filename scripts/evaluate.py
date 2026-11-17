@@ -14,10 +14,9 @@ from pathlib import Path
 
 import yaml
 
-from handoff.cli import add_config_args, config_from_args
-from handoff.config import deep_merge, parse_override
-from handoff.eval.harness import ParallelEvaluator, aggregate, policy_spec
-from handoff.logging.run_dir import CsvAppender
+from handoff.config import add_config_args, config_from_args, deep_merge, parse_override
+from handoff.rl.eval.harness import ParallelEvaluator, aggregate, policy_spec
+from handoff.rl.records.run_dir import CsvAppender
 
 
 def main():

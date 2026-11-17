@@ -6,7 +6,7 @@
 
 import argparse
 
-from handoff.cli import add_config_args, config_from_args
+from handoff.config import add_config_args, config_from_args
 from handoff.rl.train import train
 
 

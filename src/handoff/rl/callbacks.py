@@ -11,8 +11,8 @@ from pathlib import Path
 import numpy as np
 from stable_baselines3.common.callbacks import BaseCallback
 
-from handoff.eval.harness import ParallelEvaluator, aggregate, policy_spec
-from handoff.logging.run_dir import CsvAppender
+from handoff.rl.eval.harness import ParallelEvaluator, aggregate, policy_spec
+from handoff.rl.records.run_dir import CsvAppender
 
 LOG_METRICS = ("success", "collision", "off_road", "timeout", "return", "mean_speed", "min_gap", "min_ttc",
                "rms_long_jerk", "rms_lat_accel", "rms_steer_rate", "tracking_error_rms", "solve_time_mean",

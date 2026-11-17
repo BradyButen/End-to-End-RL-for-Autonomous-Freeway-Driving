@@ -1,8 +1,8 @@
 import numpy as np
 
 from handoff.config import load_config
-from handoff.sim.metadrive_env import FreewayMetaDriveEnv, make_metadrive_config
-from handoff.sim.scenario import ScenarioSpec, VehicleSpec
+from handoff.simulator.metadrive_env import FreewayMetaDriveEnv, make_metadrive_config
+from handoff.simulator.scenario import ScenarioSpec, VehicleSpec
 
 cfg = load_config("m1")
 env = FreewayMetaDriveEnv(make_metadrive_config(cfg))

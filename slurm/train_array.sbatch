@@ -1,7 +1,7 @@
 #!/bin/bash
 # Job array over methods × seeds for one reward variant (default 3 methods × 3 seeds = 9 tasks):
 #
-#   sbatch --export=ALL,REWARD=r0,SCENARIO=freeway_pass slurm/train_array.sbatch
+#   sbatch --export=ALL,REWARD=r0,SCENARIO=freeway slurm/train_array.sbatch
 #   sbatch --array=0-8%3 --export=ALL,REWARD=r2_dense_comfort slurm/train_array.sbatch   # at most 3 at a time
 #
 # Task i -> METHOD = METHODS[i / n_seeds], SEED = SEEDS[i % n_seeds]. Resources as in train.sbatch.
@@ -25,5 +25,5 @@ i="${SLURM_ARRAY_TASK_ID:?run as an array job}"
 export METHOD="${METHODS[$(( i / ${#SEEDS[@]} ))]}"
 export SEED="${SEEDS[$(( i % ${#SEEDS[@]} ))]}"
 export REWARD="${REWARD:-r0}"
-export SCENARIO="${SCENARIO:-freeway_pass}"
+export SCENARIO="${SCENARIO:-freeway}"
 exec bash "${SLURM_SUBMIT_DIR:-$(pwd)}/slurm/train.sbatch"

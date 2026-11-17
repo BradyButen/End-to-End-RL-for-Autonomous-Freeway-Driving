@@ -1,7 +1,7 @@
 #!/bin/bash
 # One training run: (method, reward variant, scenario, seed). Submit from the repo root:
 #
-#   sbatch --export=ALL,METHOD=m3,REWARD=r0,SCENARIO=freeway_pass,SEED=0 slurm/train.sbatch
+#   sbatch --export=ALL,METHOD=m3,REWARD=r0,SCENARIO=freeway,SEED=0 slurm/train.sbatch
 #   sbatch --export=ALL,METHOD=m1,EXTRA="--set training.total_control_steps=500000" slurm/train.sbatch
 #
 # GPU node by default (PPO updates on the GPU; simulation + MPC on the CPU cores). For a CPU-only run, change
@@ -21,7 +21,7 @@
 set -euo pipefail
 METHOD="${METHOD:?set METHOD=m1|m2|m3}"
 REWARD="${REWARD:-r0}"
-SCENARIO="${SCENARIO:-freeway_pass}"
+SCENARIO="${SCENARIO:-freeway}"
 SEED="${SEED:-0}"
 EXTRA="${EXTRA:-}"
 

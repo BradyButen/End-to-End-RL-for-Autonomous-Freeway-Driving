@@ -2,9 +2,8 @@ import numpy as np
 import pytest
 
 from handoff.config import load_config
-from handoff.rewards.composer import RewardComposer
-from handoff.rewards.terms import TERM_NAMES
-from handoff.sim.state import make_ego_state
+from handoff.rl.env.rewards import TERM_NAMES, RewardComposer
+from handoff.simulator.state import make_ego_state
 
 
 def _ego(road, s=100.0, d=0.0, v=20.0, steering=0.0, t=0.0):

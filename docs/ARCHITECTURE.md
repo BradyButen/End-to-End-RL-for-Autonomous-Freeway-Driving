@@ -10,23 +10,23 @@ what works and what doesn't is in [STATUS.md](STATUS.md).
 SB3 PPO (MultiInputPolicy: CNN on bev + MLP on ego)
    │  action (method-specific), once per decision
    ▼
-Method wrapper  (methods/<m>/wrapper.py)         M1Wrapper | PIDWrapper (M2) | MPCWrapper (M3) | B0Wrapper
+Method wrapper  (rl/rl/methods/<m>_main.py)         M1Wrapper | PIDWrapper (M2) | MPCWrapper (M3) | B0Wrapper
    decide(action)  -> decision + Reference       (M3: decode waypoints -> safe-set projection -> spline)
    for j in range(N):                            N = 1 (M1, B0), 5 (M2), 10 (M3) control steps
        u = control(j)                            M2: trajectory + cascaded PID; M3: corridor + MPC
-       core.control_step(u)  ───────────────►  CoreEnv (env/core.py)
-   core.end_decision(...)                          md.step(u)  -> FreewayMetaDriveEnv (sim/metadrive_env.py)
-   return obs, ΣR, terminated, truncated, info     extract EgoState / ObjectList (sim/state.py, RoadFrame)
-                                                   reward terms (rewards/), recorder (logging/recorder.py)
+       core.control_step(u)  ───────────────►  CoreEnv (rl/env/core.py)
+   core.end_decision(...)                          md.step(u)  -> FreewayMetaDriveEnv (simulator/metadrive_env.py)
+   return obs, ΣR, terminated, truncated, info     extract EgoState / ObjectList (simulator/state.py, RoadFrame)
+                                                   reward terms (rl/env/rewards.py), recorder (rl/records/recorder.py)
 ```
 
 * One control step = one MetaDrive `env.step` = 0.1 s (5 physics steps of 0.02 s).
 * Reward is summed over the control steps of a decision; PPO's discount is scaled so every method has the same
-  lookahead in seconds: `γ_method = 0.99 ** (T_decision / 0.1 s)` (`env/factory.py: method_gamma`).
+  lookahead in seconds: `γ_method = 0.99 ** (T_decision / 0.1 s)` (`rl/env/factory.py: method_gamma`).
 * Every env runs in its own process (MetaDrive allows one instance per process): SB3 `SubprocVecEnv` for training,
-  separate worker processes for evaluation (`eval/harness.py`).
+  separate worker processes for evaluation (`rl/eval/harness.py`).
 
-## 2. Simulation layer (`sim/`)
+## 2. Simulation layer (`simulator/`)
 
 ### `metadrive_env.py` — MetaDrive integration (MetaDrive source is not modified)
 * **`FreewayMetaDriveEnv`** subclasses MetaDrive's `VaryingDynamicsEnv`:
@@ -43,8 +43,7 @@ Method wrapper  (methods/<m>/wrapper.py)         M1Wrapper | PIDWrapper (M2) | M
   per-vehicle IDM cruise speed and lane-change switch (`ScenarioIDMPolicy`). Vehicles are removed only when they
   geometrically leave the road.
 * **`ScenarioAgentManager`** places the ego (lane, s, speed) from the spec.
-* The B0 driver (`EgoIDMPolicy`, stock IDM + lane changes at the global target speed) lives in
-  `methods/b0/idm.py`; the B0 wrapper hands it to MetaDrive as `agent_policy`.
+* B0 uses MetaDrive's stock `IDMPolicy` directly; `rl/methods/b0_main.py` hands it to MetaDrive as `agent_policy`.
 * The spec for the upcoming reset is handed to the managers through a module-level holder (`_EPISODE`), set right
   before `reset` — safe because there is one MetaDrive per process.
 
@@ -63,7 +62,7 @@ time-to-collision helpers used by metrics.
 Options: background lanes `other` (not the ego lane) or `all`; placement relative to the ego (`s_offset`) or along the
 whole route (`s_range`).
 
-## 3. Core env (`env/core.py`)
+## 3. Core env (`rl/env/core.py`)
 
 `CoreEnv` is the Gymnasium env shared by every method:
 * **reset**: picks the episode seed (training: drawn from `[train_low, train_high)` by a per-env RNG; evaluation:
@@ -75,11 +74,11 @@ whole route (`s_range`).
 * **end_decision(...)**: records the decision-level row; on termination computes the episode summary
   (`info["episode_summary"]`) and writes the full npz log if this episode is logged in full.
 
-## 4. Methods (`methods/`)
+## 4. Methods (`rl/methods/`)
 
-One folder per method (`b0/`, `m1/`, `m2/`, `m3/`), each with a `wrapper.py` (subclass of `env/decision.py:
-DecisionWrapper`: `decide(action)` once per decision, `control(j)` once per control step) plus that method's
-components. `methods/common/` holds what M2 and M3 share (`Reference`, quintic helpers, actuation table).
+One flat folder. Each method has a `<m>_main.py` (subclass of `rl/env/decision.py:DecisionWrapper`:
+`decide(action)` once per decision, `control(j)` once per control step) plus `<m>_<component>.py` files for its
+components. `rl/methods/common.py` holds what M2 and M3 share (`Reference`, quintic helpers, actuation table).
 
 | | action | decode | controller (every 0.1 s) |
 |---|---|---|---|
@@ -90,24 +89,24 @@ components. `methods/common/` holds what M2 and M3 share (`Reference`, quintic h
 
 ### M3 pipeline (once per decision = 10 control steps)
 1. **Decode** to k Frenet waypoints `(s_i, d_i)`, increasing in s.
-2. **Safe-set projection** (`methods/m3/safe_set.py`): each waypoint is moved to the nearest point that is
+2. **Safe-set projection** (`rl/methods/m3_safe_set.py`): each waypoint is moved to the nearest point that is
    (a) on the road with room for the ego, (b) outside every car's inflated footprint predicted at the ego's arrival time,
    (c) reachable (≥ 2 m after the previous waypoint, lateral shift within a lateral-acceleration budget). Infeasible
    waypoints are dropped (10 m penalty each); none left → "hold current lane". Distances feed `projection_penalty`.
-3. **Spline** (`methods/m3/spline.py`): piecewise-quintic path from the ego pose through the waypoints (zero slope
+3. **Spline** (`rl/methods/m3_spline.py`): piecewise-quintic path from the ego pose through the waypoints (zero slope
    and curvature at each waypoint → no overshoot), extended 80 m.
-4. **Corridor** (`methods/m3/corridor.py`, rebuilt every 10 steps and on each new reference):
+4. **Corridor** (`rl/methods/m3_corridor.py`, rebuilt every 10 steps and on each new reference):
    * initial trajectory along the spline, speed ramping to 70 km/h, slowing to stop 2 m behind any car blocking the path;
    * one box per stage (3 s, 30 stages) around it, grown face by face until an inflated car or the road edge;
      road-aligned, or rotated to the trajectory heading while lane-changing; returned as 4 half-spaces `A p ≤ b`.
-5. **MPC** (`methods/m3/mpc.py`, every control step): CasADi + IPOPT, N = 20 × 0.1 s, kinematic bicycle + 0.1 s
+5. **MPC** (`rl/methods/m3_mpc.py`, every control step): CasADi + IPOPT, N = 20 × 0.1 s, kinematic bicycle + 0.1 s
    steering lag, tracking the initial trajectory; **hard** tube constraints on the ego centre, input/rate/speed bounds,
    lateral-acceleration bound. Output → steering (÷40°) and throttle/brake via the measured lookup table
-   (`methods/common/actuation.py`, `actuation.table` in `configs/base.yaml`).
+   (`rl/methods/common.py`, `actuation.table` in `configs/base.yaml`).
 6. **Fallbacks**: failed solve → rebuild tube + retry once → replay previous plan (≤ 5 steps) → emergency brake with
    lane hold. Every fallback is logged with its reason.
 
-## 5. Rewards (`rewards/`)
+## 5. Rewards (`rl/env/rewards.py`)
 * `terms.py`: `progress`, `speed`, `speed_tracking`, `success`, `collision`, `off_road`, `lane_center`, `jerk`,
   `steer_rate`, `time`, `projection_penalty` — each with a docstring definition and units.
 * `composer.py`: weighted sum from `configs/reward/<variant>.yaml`. `terminal_mode: replace` reproduces MetaDrive's
@@ -121,15 +120,15 @@ components. `methods/common/` holds what M2 and M3 share (`Reference`, quintic h
 * `rl/callbacks.py`: writes `episodes.csv`, logs counters (control steps / decisions / simulated time), evaluates at
   step 0 and every `eval.freq_control_steps` on the 20 fixed seeds (deterministic actions) in separate processes,
   saves `best.zip` (by success rate, then return), periodic checkpoints, `final.zip`.
-* `eval/harness.py`: method-agnostic episode runner + parallel evaluation workers; `eval/metrics.py`: episode metrics
+* `rl/eval/harness.py`: method-agnostic episode runner + parallel evaluation workers; `rl/eval/metrics.py`: episode metrics
   (success/collision/off-road/timeout, time to complete, mean speed, min gap, min TTC, RMS jerk / lateral accel /
   steering rate, tracking error, MPC solve time & fallbacks, projection distance, k histogram, lane changes).
-* `logging/recorder.py`: control-step, decision and episode records; full logs (`episodes/<id>.npz`) for every
+* `rl/records/recorder.py`: control-step, decision and episode records; full logs (`episodes/<id>.npz`) for every
   evaluation episode and every 50th training episode per env. `load_episode(path)` reads them back.
 * Run directory: `runs/<method>/<reward>/seed_<n>/<timestamp>/{config.yaml, git_commit.txt, device.txt,
   train_progress.csv, episodes.csv, episodes/, checkpoints/}`.
 
-## 7. Visualisation (`viz/`)
+## 7. Visualisation (`simulator/`)
 * `viewer.py` + `scripts/view.py`: live runs in MetaDrive's 3D window (or `--topdown` 2D) with overlays drawn by
   `overlays.py` — reference (yellow), MPC prediction (cyan), raw/projected waypoints (red/green), safe-set footprints
   (magenta), corridor boxes (blue), status text. Replay re-simulates a logged episode from its seed + checkpoint

@@ -48,16 +48,22 @@ Any config value can be overridden with `--set key.sub=value` (e.g. `--set metho
 ```
 configs/        base.yaml, scenario/, method/ (m1 m2 m3 b0), reward/ (r0 r1_sparse r2_dense_comfort)
 src/handoff/
-  sim/          the plant: MetaDrive env, scenario sampling, Frenet road frame, state extraction
-  env/          shared Gym layer: core.py (obs, reward, logging, one 0.1 s step), decision.py (decide -> N steps loop),
-                factory.py (method name -> wrapped env)
-  methods/
-    common/     Reference type, quintic helpers, throttle/brake lookup table (used by M2 and M3)
-    b0/         wrapper.py, idm.py (MetaDrive IDM drives the ego)
-    m1/         wrapper.py (action = steering/throttle)
-    m2/         wrapper.py, trajectory.py (quintic + speed profile), pid.py
-    m3/         wrapper.py, safe_set.py -> spline.py -> corridor.py -> mpc.py (pipeline order)
-  rewards/ · rl/ (training) · eval/ · logging/ · viz/ · config.py
+  config.py       YAML config loading/merging + the shared script arguments (--method --reward --scenario --set)
+  simulator/      the plant + its visualisation: stock MetaDrive env config, Frenet road frame, state
+                  extraction, viewer/overlays (live + replay), plots
+  rl/             everything the learning problem is made of
+    env/          shared Gym layer: core.py (obs, reward, logging, one 0.1 s step),
+                  decision.py (decide -> N control steps loop), factory.py (method name -> wrapped env),
+                  rewards.py (reward terms + config-driven composer)
+    methods/      one file per method + its components, in pipeline order:
+                  b0_main.py   (MetaDrive's stock IDMPolicy drives the ego)
+                  m1_main.py   (action = steering/throttle)
+                  m2_main.py -> m2_trajectory.py (quintic + speed profile) -> m2_pid.py
+                  m3_main.py -> m3_safe_set.py -> m3_spline.py -> m3_corridor.py -> m3_mpc.py
+                  common.py    (Reference, quintic helpers, throttle/brake table; shared by M2 and M3)
+    eval/         harness.py (run a policy on fixed seeds, parallel workers), metrics.py (episode metrics)
+    records/      recorder.py (per-step/decision/episode logs, .npz), run_dir.py (run folders, CSVs)
+    train.py, callbacks.py   PPO training entry point, eval/checkpoint callbacks
 scripts/        tools you use: train, evaluate, view, plot, calibrate_actuation
 slurm/          Great Lakes setup + job scripts
 tests/          everything that checks the code:

@@ -4,13 +4,14 @@ import numpy as np
 import pytest
 
 from handoff.config import deep_merge, load_config, parse_override
-from handoff.controllers.actuation import ActuationMap
+from handoff.env.decision import affine
+from handoff.env.factory import method_gamma
 from handoff.eval.metrics import count_lane_changes, episode_metrics, termination_reason
+from handoff.methods.common.actuation import ActuationMap
+from handoff.methods.m3.wrapper import waypoint_count
 from handoff.sim.road import RoadFrame
 from handoff.sim.scenario import VEHICLE_LENGTHS, FreewayPassScenario
 from handoff.sim.state import frenet_box_gap, make_ego_state, make_tracked_object, time_to_collision
-from handoff.wrappers.factory import method_gamma
-from handoff.wrappers.methods import affine, waypoint_count
 
 
 # ----------------------------------------------------------------------------- config

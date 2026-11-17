@@ -179,17 +179,6 @@ class ScenarioIDMPolicy(IDMPolicy):
         return super().acceleration(front_obj, dist_to_front)
 
 
-class EgoIDMPolicy(IDMPolicy):
-    """B0 baseline: stock IDMPolicy (car following + lane changes) at the global target speed."""
-
-    def __init__(self, control_object, random_seed):
-        super().__init__(control_object=control_object, random_seed=random_seed)
-        cfg = self.engine.global_config
-        self.NORMAL_SPEED = float(cfg["handoff_target_speed_km_h"])
-        self.target_speed = self.NORMAL_SPEED
-        self.enable_lane_change = bool(cfg["handoff_idm_lane_change"])
-
-
 # --------------------------------------------------------------------------------------- managers
 class ScenarioTrafficManager(PGTrafficManager):
     """Spawns exactly the lead + background vehicles of the current ScenarioSpec (spec §4.4)."""
@@ -315,7 +304,8 @@ class FreewayMetaDriveEnv(VaryingDynamicsEnv):
         return self.engine.traffic_manager.roles
 
 
-def make_metadrive_config(cfg: dict, render: bool = False, b0: bool = False) -> dict:
+def make_metadrive_config(cfg: dict, render: bool = False, agent_policy=None) -> dict:
+    """``agent_policy``: MetaDrive policy class driving the ego (None = our env action; B0 passes IDM)."""
     sim = cfg["sim"]
     ego = sim["ego"]
     bev = cfg["observation"]["bev"]
@@ -361,7 +351,7 @@ def make_metadrive_config(cfg: dict, render: bool = False, b0: bool = False) -> 
         handoff_target_speed_km_h=float(sim["target_speed_km_h"]),
         handoff_idm_lane_change=bool(cfg.get("method", {}).get("idm_lane_change", True)),
         handoff_one_way=bool(sim["map"].get("one_way", False)),
-        agent_policy=EgoIDMPolicy if b0 else EnvInputPolicy,
+        agent_policy=agent_policy or EnvInputPolicy,
         show_logo=False,
         show_fps=render,
         preload_models=False,

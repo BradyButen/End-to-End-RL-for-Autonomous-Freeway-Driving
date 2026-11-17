@@ -4,9 +4,9 @@ import os; sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."
 from conftest import KinematicPlant
 
 from handoff.config import kmh, load_config
-from handoff.controllers.actuation import ActuationMap
-from handoff.controllers.mpc import MPCController
-from handoff.controllers.spline import build_m3_reference
+from handoff.methods.common.actuation import ActuationMap
+from handoff.methods.m3.mpc import MPCController
+from handoff.methods.m3.spline import build_m3_reference
 from handoff.sim.road import RoadFrame
 from handoff.sim.state import make_tracked_object
 

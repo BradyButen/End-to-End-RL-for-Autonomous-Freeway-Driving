@@ -7,7 +7,7 @@ Owns the MetaDrive instance and everything common to M1/M2/M3/B0:
   * reward composition (all terms computed + logged every control step, spec §9),
   * logging hooks (EpisodeRecorder, spec §12).
 
-Method wrappers (``wrappers/methods.py``) call ``control_step`` once per control step and
+Method wrappers (``methods/<m>/wrapper.py`` via ``env/decision.py``) call ``control_step`` once per control step and
 ``end_decision`` once per RL decision. ``step`` = one control step + one decision (M1 semantics).
 """
 
@@ -39,13 +39,12 @@ class CoreEnv(gym.Env):
     metadata = {"render_modes": []}
 
     def __init__(self, cfg: dict, *, rank: int = 0, run_dir: str | Path | None = None, is_eval: bool = False,
-                 render: bool = False, b0: bool = False):
+                 render: bool = False, agent_policy=None):
         super().__init__()
         self.cfg = cfg
         self.rank = rank
         self.is_eval = is_eval
-        self.b0 = b0
-        self.md = FreewayMetaDriveEnv(make_metadrive_config(cfg, render=render, b0=b0))
+        self.md = FreewayMetaDriveEnv(make_metadrive_config(cfg, render=render, agent_policy=agent_policy))
         self.scenario = make_scenario(cfg)
         sim = cfg["sim"]
         self.dt = float(sim["control_dt"])

@@ -196,8 +196,8 @@ logs). **[v2]** Overlays include corridor boxes. Analysis plots: learning curves
 Unchanged (YAML merge base → scenario → method → reward → CLI `--set`; merged config saved per run).
 
 ## 15. Repository layout
-As v1.0 with package `handoff`, plus **[v2]** `controllers/corridor.py`, `controllers/actuation.py`,
-`controllers/spline.py`, `scripts/validate.py`, `scripts/profile_timing.py`, `scripts/calibrate_actuation.py`,
+As v1.0 with package `handoff`, plus **[v2]** `methods/m3/corridor.py`, `methods/common/actuation.py`,
+`methods/m3/spline.py`, `scripts/validate.py`, `scripts/profile_timing.py`, `scripts/calibrate_actuation.py`,
 `scripts/debug/`, `slurm/`, `docs/`.
 
 ## 16. Interface contracts

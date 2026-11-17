@@ -1,4 +1,4 @@
-"""Controller interface and the shared Reference type (spec §16). No MetaDrive / SB3 dependency."""
+"""The Reference type shared by M2 and M3 (spec §16), plus the Controller interface. No MetaDrive / SB3 dependency."""
 
 from __future__ import annotations
 

@@ -6,7 +6,7 @@ import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 
 from handoff.config import kmh, load_config  # noqa: E402
-from handoff.controllers.actuation import ActuationMap  # noqa: E402
+from handoff.methods.common.actuation import ActuationMap  # noqa: E402
 from handoff.sim.road import RoadFrame  # noqa: E402
 
 

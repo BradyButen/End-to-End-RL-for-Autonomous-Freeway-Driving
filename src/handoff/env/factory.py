@@ -4,8 +4,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from handoff.wrappers.core import CoreEnv
-from handoff.wrappers.methods import METHOD_WRAPPERS, DecisionWrapper
+from handoff.env.core import CoreEnv
+from handoff.env.decision import DecisionWrapper
+from handoff.methods.b0.wrapper import B0Wrapper
+from handoff.methods.m1.wrapper import M1Wrapper
+from handoff.methods.m2.wrapper import PIDWrapper
+from handoff.methods.m3.wrapper import MPCWrapper
+
+METHOD_WRAPPERS: dict[str, type[DecisionWrapper]] = {
+    "b0": B0Wrapper, "m1": M1Wrapper, "m2": PIDWrapper, "m3": MPCWrapper,
+}
 
 
 def make_env(cfg: dict, *, rank: int = 0, run_dir: str | Path | None = None, is_eval: bool = False,
@@ -13,8 +21,10 @@ def make_env(cfg: dict, *, rank: int = 0, run_dir: str | Path | None = None, is_
     method = cfg["method"]["name"]
     if method not in METHOD_WRAPPERS:
         raise ValueError(f"Unknown method {method}")
-    core = CoreEnv(cfg, rank=rank, run_dir=run_dir, is_eval=is_eval, render=render, b0=(method == "b0"))
-    return METHOD_WRAPPERS[method](core, cfg)
+    wrapper = METHOD_WRAPPERS[method]
+    core = CoreEnv(cfg, rank=rank, run_dir=run_dir, is_eval=is_eval, render=render,
+                   agent_policy=wrapper.agent_policy)
+    return wrapper(core, cfg)
 
 
 def env_factory(cfg: dict, *, rank: int = 0, run_dir=None, is_eval: bool = False, monitor: bool = False):

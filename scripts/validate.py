@@ -56,7 +56,7 @@ class _FixedScenario:
 
 
 def _env_with_spec(method, spec, overrides=(), run_dir=None):
-    from handoff.wrappers.factory import make_env
+    from handoff.env.factory import make_env
 
     cfg = load_config(method, overrides=list(overrides))
     env = make_env(cfg, is_eval=True, run_dir=run_dir)
@@ -80,8 +80,8 @@ def _all_traffic(core, role=None):
 
 # ----------------------------------------------------------------------------------------------- checks
 def check_env() -> dict:
+    from handoff.env.factory import make_env
     from handoff.sim.metadrive_env import geometric_off_road
-    from handoff.wrappers.factory import make_env
 
     cfg = load_config("m1")
     env = make_env(cfg, is_eval=True)
@@ -163,7 +163,7 @@ def check_env() -> dict:
 
 
 def _determinism() -> dict:
-    from handoff.wrappers.factory import make_env
+    from handoff.env.factory import make_env
 
     cfg = load_config("m3")
     env = make_env(cfg, is_eval=True)
@@ -296,10 +296,10 @@ def check_mpc() -> dict:
 
 
 def check_smoke(n_episodes: int = 2) -> dict:
+    from handoff.env.factory import make_env
     from handoff.logging.recorder import load_episode
     from handoff.logging.run_dir import CsvAppender
     from handoff.rewards.terms import TERM_NAMES
-    from handoff.wrappers.factory import make_env
 
     out = {}
     tmp = OUT / "smoke"

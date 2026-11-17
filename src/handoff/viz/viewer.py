@@ -10,10 +10,10 @@ from __future__ import annotations
 
 import numpy as np
 
+from handoff.env.factory import make_env
 from handoff.eval.harness import run_episodes, sb3_policy_fn
 from handoff.logging.recorder import load_episode
 from handoff.viz.overlays import OverlayDrawer, live_frame, replay_frame
-from handoff.wrappers.factory import make_env
 
 
 def load_policy_fn(checkpoint: str | None, deterministic: bool = True):

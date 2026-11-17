@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from handoff.controllers.actuation import ActuationMap
-from handoff.controllers.base import Reference
+from handoff.methods.common.actuation import ActuationMap
+from handoff.methods.common.reference import Reference
 from handoff.sim.road import wrap_angle
 from handoff.sim.state import EgoState, ObjectList
 

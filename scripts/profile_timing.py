@@ -24,8 +24,8 @@ from stable_baselines3 import PPO  # noqa: E402
 from stable_baselines3.common.vec_env import DummyVecEnv  # noqa: E402
 
 from handoff.config import load_config  # noqa: E402
+from handoff.env.factory import make_env  # noqa: E402
 from handoff.rl.train import ppo_kwargs  # noqa: E402
-from handoff.wrappers.factory import make_env  # noqa: E402
 
 
 class Timer:

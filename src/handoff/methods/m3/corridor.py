@@ -26,7 +26,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from handoff.controllers.base import Reference
+from handoff.methods.common.reference import Reference
 from handoff.sim.road import RoadFrame, wrap_angle
 from handoff.sim.state import EgoState, ObjectList, frenet_velocity
 

@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from handoff.controllers.base import Reference
-from handoff.controllers.trajectory import quintic_coefficients
+from handoff.methods.common.quintic import quintic_coefficients
+from handoff.methods.common.reference import Reference
 from handoff.sim.road import RoadFrame
 from handoff.sim.state import EgoState
 

@@ -13,9 +13,9 @@ from stable_baselines3 import PPO  # noqa: E402
 from stable_baselines3.common.logger import CSVOutputFormat, HumanOutputFormat, Logger  # noqa: E402
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv  # noqa: E402
 
+from handoff.env.factory import env_factory, method_gamma  # noqa: E402
 from handoff.logging.run_dir import init_run_dir, make_run_dir  # noqa: E402
 from handoff.rl.callbacks import HandoffCallback  # noqa: E402
-from handoff.wrappers.factory import env_factory, method_gamma  # noqa: E402
 
 
 def build_vec_env(cfg: dict, run_dir: Path, n_envs: int):

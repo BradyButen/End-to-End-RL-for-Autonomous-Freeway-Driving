@@ -32,9 +32,9 @@ import time
 import casadi as ca
 import numpy as np
 
-from handoff.controllers.actuation import ActuationMap
-from handoff.controllers.base import Reference
-from handoff.controllers.corridor import CorridorBuilder, Tube
+from handoff.methods.common.actuation import ActuationMap
+from handoff.methods.common.reference import Reference
+from handoff.methods.m3.corridor import CorridorBuilder, Tube
 from handoff.sim.road import RoadFrame, wrap_angle
 from handoff.sim.state import EgoState, ObjectList
 

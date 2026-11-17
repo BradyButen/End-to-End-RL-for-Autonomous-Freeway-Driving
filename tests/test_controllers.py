@@ -4,16 +4,16 @@ import numpy as np
 import pytest
 
 from handoff.config import kmh
-from handoff.controllers.mpc import MPCController
-from handoff.controllers.pid import PID, CascadedPIDController
-from handoff.controllers.safe_set import project_waypoints, project_waypoints_detailed
-from handoff.controllers.spline import build_m3_reference
-from handoff.controllers.trajectory import (
+from handoff.methods.m2.pid import PID, CascadedPIDController
+from handoff.methods.m2.trajectory import (
     build_m2_reference,
     eval_quintic,
     quintic_coefficients,
     speed_profile,
 )
+from handoff.methods.m3.mpc import MPCController
+from handoff.methods.m3.safe_set import project_waypoints, project_waypoints_detailed
+from handoff.methods.m3.spline import build_m3_reference
 from handoff.sim.state import make_tracked_object
 
 

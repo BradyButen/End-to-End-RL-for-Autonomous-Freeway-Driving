@@ -57,7 +57,7 @@ def _worker(conn, cfg: dict, run_dir: str | None, worker_id: int):
     import torch
 
     torch.set_num_threads(1)
-    from handoff.wrappers.factory import make_env
+    from handoff.env.factory import make_env
 
     env = None
     policy = None

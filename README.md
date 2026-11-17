@@ -47,9 +47,17 @@ Any config value can be overridden with `--set key.sub=value` (e.g. `--set metho
 ## Layout
 ```
 configs/        base.yaml, scenario/, method/ (m1 m2 m3 b0), reward/ (r0 r1_sparse r2_dense_comfort)
-src/handoff/    sim/ (MetaDrive env, scenario, Frenet road frame, state) · controllers/ (PID, trajectory, spline,
-                safe set, corridor, MPC, actuation) · wrappers/ (core env + method wrappers) · rewards/ · rl/ ·
-                eval/ · logging/ · viz/
+src/handoff/
+  sim/          the plant: MetaDrive env, scenario sampling, Frenet road frame, state extraction
+  env/          shared Gym layer: core.py (obs, reward, logging, one 0.1 s step), decision.py (decide -> N steps loop),
+                factory.py (method name -> wrapped env)
+  methods/
+    common/     Reference type, quintic helpers, throttle/brake lookup table (used by M2 and M3)
+    b0/         wrapper.py, idm.py (MetaDrive IDM drives the ego)
+    m1/         wrapper.py (action = steering/throttle)
+    m2/         wrapper.py, trajectory.py (quintic + speed profile), pid.py
+    m3/         wrapper.py, safe_set.py -> spline.py -> corridor.py -> mpc.py (pipeline order)
+  rewards/ · rl/ (training) · eval/ · logging/ · viz/ · config.py
 scripts/        train, evaluate, validate, benchmark, profile, view, plot, calibrate; debug/ probes
 slurm/          Great Lakes setup + job scripts
 tests/          pytest unit tests (kinematic plant stands in for MetaDrive)

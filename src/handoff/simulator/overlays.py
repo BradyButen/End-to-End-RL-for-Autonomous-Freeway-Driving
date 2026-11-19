@@ -43,6 +43,10 @@ class OverlayDrawer:
     def __init__(self, engine):
         self.engine = engine
         self.lines = engine.make_line_drawer(thickness=3.0)
+        # MetaDrive's line drawer enables the auto shader + scene lights; line geometry has no normals, so the lines
+        # render invisible. Draw them unlit with the fixed-function colours instead.
+        self.lines.setShaderOff(1)
+        self.lines.setLightOff(1)
         self.points = engine.make_point_drawer(scale=4.0)
 
     def draw(self, frame: dict) -> None:
@@ -91,7 +95,7 @@ def live_frame(core, decision_ctx: dict | None, diag: dict | None, mpc_horizon_s
     if diag.get("pred_xy") is not None:
         frame["pred_xy"] = diag["pred_xy"]
     if diag.get("tube_corners") is not None:
-        frame["tube"] = list(diag["tube_corners"][::2])  # every other stage, to keep it readable
+        frame["tube"] = list(diag["tube_corners"][:1])  # current stage only; future stages clutter the view
     dec = (decision_ctx or {}).get("decision") or {}
     if "waypoints_raw" in dec:
         raw = np.asarray(dec["waypoints_raw"]).reshape(-1, 2)

@@ -13,6 +13,7 @@ inside a hard collision-free corridor, and **B0** is MetaDrive's rule-based IDM.
 | [docs/SPEC_v2.md](docs/SPEC_v2.md) | the specification (v2, changes from v1.0 highlighted) |
 | [docs/DECISIONS.md](docs/DECISIONS.md) | every decision / deviation from the v1.0 spec, with IDs referenced in code |
 | [docs/GREAT_LAKES.md](docs/GREAT_LAKES.md) | running training on the cluster |
+| [docs/RETRAINING_PLAN.md](docs/RETRAINING_PLAN.md) | pilot round 1 results + proposed changes for the next training round |
 
 ## Setup (dev machine)
 Python 3.12 (3.10–3.12 work). MetaDrive is installed from a pinned GitHub commit because the PyPI wheel does not

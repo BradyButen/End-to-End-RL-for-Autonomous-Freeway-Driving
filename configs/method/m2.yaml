@@ -13,9 +13,11 @@ method:
     decel_limit: 4.0           # speed-profile deceleration limit (m/s^2)
     replan_from: reference     # initial (d_dot, d_ddot) from previous reference ("reference") or measured
   pid:
-    heading: [1.7, 0.01, 3.5]  # from MetaDrive LaneChangePolicy
-    lateral: [0.3, 0.002, 0.05]
-    speed: [0.6, 0.02, 0.0]    # on (v_ref - v) in m/s -> throttle_brake
+    # Tuned 2026-11-19 on the kinematic bicycle + 0.12 s steering lag (scripts/matlab/m2_pid_tuning.m).
+    # Was heading [1.7, 0.01, 3.5], lateral [0.3, 0.002, 0.05], speed [0.6, 0.02, 0.0] (MetaDrive LaneChangePolicy).
+    heading: [1.0, 0.005, 0.0]
+    lateral: [0.06, 0.0005, 0.0]
+    speed: [0.25, 0.0008, 0.0] # on (v_ref - v) in m/s -> throttle_brake
     integral_limit: 5.0
     speed_feedforward: true    # add a_ref -> throttle_brake feed-forward from the actuation table
 

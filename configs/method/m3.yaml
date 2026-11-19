@@ -42,7 +42,7 @@ method:
     steer_rate_limit: 0.6      # rad/s
     corridor:                  # hard convex tube: 4 half-spaces per stage on the ego centre (DECISIONS D-13)
       horizon: 3.0             # s; must cover MPC horizon + rebuild period
-      rebuild_period: 10       # control steps between tube rebuilds (also rebuilt on every new RL reference)
+      rebuild_period: 1        # control steps between tube rebuilds: every step (was 10; 2026-11-19)
       margin_s: 1.0            # car inflation beyond ego half-length (m)
       margin_d: 0.3            # car inflation beyond ego half-width (m)
       edge_margin: 0.1         # road edge clearance beyond ego half-width (m)

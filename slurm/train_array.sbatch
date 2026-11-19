@@ -7,7 +7,7 @@
 # Task i -> METHOD = METHODS[i / n_seeds], SEED = SEEDS[i % n_seeds]. Resources as in train.sbatch.
 #
 #SBATCH --job-name=handoff-array
-#SBATCH --account=TODO_ACCOUNT
+#SBATCH --account=rob535_navarch565_f26_class
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1

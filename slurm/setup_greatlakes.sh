@@ -9,7 +9,7 @@
 #   * the CUDA wheel index matching the cluster driver (`nvidia-smi` on a GPU node); cu121 is a safe default.
 set -euo pipefail
 
-PY_MODULE="${PY_MODULE:-python/3.12}"     # TODO: confirm the exact module name with `module avail python`
+PY_MODULE="${PY_MODULE:-python/3.12.1}"
 CUDA_INDEX="${CUDA_INDEX:-https://download.pytorch.org/whl/cu121}"
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 VENV="${VENV:-$REPO_DIR/.venv}"

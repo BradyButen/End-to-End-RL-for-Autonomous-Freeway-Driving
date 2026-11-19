@@ -4,24 +4,23 @@ Training runs on UMich Great Lakes (SLURM). Everything is headless: MetaDrive ph
 no display or GPU; the GPU (if any) only speeds up PPO's gradient updates.
 
 > **Untested on the cluster.** The scripts in `slurm/` were written on the dev machine. Items marked TODO
-> (account, Python module name, CUDA wheel) must be confirmed on Great Lakes first.
+> (CUDA wheel) must be confirmed on Great Lakes first.
 
 ## 1. One-time setup (login node — needs internet)
 ```bash
-git clone <repo-url> handoff && cd handoff          # repo not on GitHub yet
+git clone https://github.com/BradyButen/learning-driving-control.git handoff && cd handoff
 module avail python                                  # pick 3.10–3.12; set PY_MODULE accordingly
-PY_MODULE=python/3.12 bash slurm/setup_greatlakes.sh            # CUDA PyTorch (gpu / spgpu partitions)
-PY_MODULE=python/3.12 CPU_ONLY=1 bash slurm/setup_greatlakes.sh # or CPU-only PyTorch (standard partition)
+PY_MODULE=python/3.12.1 bash slurm/setup_greatlakes.sh            # CUDA PyTorch (gpu / spgpu partitions)
+PY_MODULE=python/3.12.1 CPU_ONLY=1 bash slurm/setup_greatlakes.sh # or CPU-only PyTorch (standard partition)
 ```
 The script creates `.venv`, installs PyTorch (CUDA `cu121` wheel by default; override `CUDA_INDEX`), installs the
 package, **downloads MetaDrive's assets** (compute nodes may have no internet), and runs the unit tests and a
 headless smoke check.
 
-Edit `#SBATCH --account=TODO_ACCOUNT` in `slurm/*.sbatch` to your account.
 
 ## 2. Measure before committing hours
 ```bash
-srun --account=<acct> --partition=gpu --gres=gpu:1 --cpus-per-task=8 --time=00:30:00 --pty bash
+srun --account=rob535_navarch565_f26_class --partition=gpu --gres=gpu:1 --cpus-per-task=8 --time=00:30:00 --pty bash
 source .venv/bin/activate && export SDL_VIDEODRIVER=dummy && unset PYTHONPATH
 python tests/profile_timing.py --threads 2                     # per-decision time breakdown + PPO update time
 python tests/benchmark_throughput.py --n-envs 4 8 16 --decisions 150

@@ -5,7 +5,7 @@
 #   sbatch --export=ALL,METHOD=b0,SCENARIO=freeway slurm/evaluate.sbatch
 #
 #SBATCH --job-name=handoff-eval
-#SBATCH --account=TODO_ACCOUNT
+#SBATCH --account=rob535_navarch565_f26_class
 #SBATCH --partition=standard
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -18,7 +18,7 @@ set -euo pipefail
 METHOD="${METHOD:?set METHOD}"
 SCENARIO="${SCENARIO:-freeway}"
 cd "${SLURM_SUBMIT_DIR:-$(pwd)}"
-module load "${PY_MODULE:-python/3.12}"
+module load "${PY_MODULE:-python/3.12.1}"
 source "${VENV:-.venv}/bin/activate"
 export SDL_VIDEODRIVER=dummy OMP_NUM_THREADS=1
 unset PYTHONPATH

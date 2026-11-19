@@ -8,7 +8,7 @@
 # --partition to standard, drop --gres, and add EXTRA="--set training.device=cpu --set training.torch_threads=4".
 #
 #SBATCH --job-name=handoff-train
-#SBATCH --account=TODO_ACCOUNT          # TODO: your Great Lakes account (e.g. the course/lab account)
+#SBATCH --account=rob535_navarch565_f26_class
 #SBATCH --partition=gpu                 # gpu (V100) or spgpu (A40); standard for CPU-only
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
@@ -27,7 +27,7 @@ EXTRA="${EXTRA:-}"
 
 REPO_DIR="${SLURM_SUBMIT_DIR:-$(pwd)}"
 cd "$REPO_DIR"
-module load "${PY_MODULE:-python/3.12}"   # TODO: same module as in setup_greatlakes.sh
+module load "${PY_MODULE:-python/3.12.1}"
 source "${VENV:-$REPO_DIR/.venv}/bin/activate"
 
 export SDL_VIDEODRIVER=dummy              # headless pygame (BEV observation)

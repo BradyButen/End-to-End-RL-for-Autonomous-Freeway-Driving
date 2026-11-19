@@ -24,7 +24,7 @@ method:
     ds: 1.0                    # path sample spacing (m)
     extend: 80.0               # path is extended flat beyond the last waypoint (m)
   mpc:
-    horizon: 20                # N
+    horizon: 50                # N (5.0 s at dt 0.1; was 20)
     steer_lag: 0.1             # s, first-order wheel-angle lag in the MPC model (measured)
     dt: 0.1
     weights:
@@ -36,12 +36,13 @@ method:
       steer_rate: 20.0
       accel_rate: 0.5
       terminal_factor: 3.0
-    accel_bounds: [-6.0, 2.5]  # m/s^2
+    accel_bounds: [-8.0, 2.5]  # m/s^2 (was -6; -8 is about where MetaDrive braking stops being linear)
     max_lat_accel: 4.0         # m/s^2, |v² tan(δ)/L| bound
-    max_fallback_shift: 5      # replay at most this many steps of a stale plan, then emergency brake
+    max_fallback_shift: 0      # steps of a stale plan to replay on a failed solve before emergency brake (was 5;
+                               # 0 = brake immediately when no feasible plan exists)
     steer_rate_limit: 0.6      # rad/s
     corridor:                  # hard convex tube: 4 half-spaces per stage on the ego centre (DECISIONS D-13)
-      horizon: 3.0             # s; must cover MPC horizon + rebuild period
+      horizon: 5.5             # s; must cover MPC horizon + rebuild period (51 stages needed for N = 50; was 3.0)
       rebuild_period: 1        # control steps between tube rebuilds: every step (was 10; 2026-11-19)
       margin_s: 1.0            # car inflation beyond ego half-length (m)
       margin_d: 0.3            # car inflation beyond ego half-width (m)

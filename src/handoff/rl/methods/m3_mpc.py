@@ -122,6 +122,7 @@ class MPCController:
                 lbg.append(-ca.inf)
                 ubg.append(0.0)
 
+        J += self._extra_cost(X, tube)
         wvec = ca.vertcat(ca.vec(X), ca.vec(U))
         nlp = {"x": wvec, "p": P, "f": J, "g": ca.vertcat(*g)}
         s = self.cfg["solver"]
@@ -153,6 +154,11 @@ class MPCController:
         lbx[nX + 1:nX + nU:2] = a_lo
         ubx[nX + 1:nX + nU:2] = a_hi
         self.lbx, self.ubx = lbx, ubx
+
+    def _extra_cost(self, X, tube):
+        """Hook for additional cost terms (e.g. test harnesses); X: (NX, N+1) states, tube: (12, N+1) half-spaces
+        per stage as 4 x (a_x, a_y, b). M3 itself adds nothing."""
+        return 0
 
     # ------------------------------------------------------------------ runtime
     def reset(self) -> None:

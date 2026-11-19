@@ -1,6 +1,6 @@
 #!/usr/bin/env python
-"""M3 test harness: the M3 pipeline (safe-set projection -> spline -> corridor -> MPC) driven by hand-placed
-waypoints instead of the RL policy, in MetaDrive in real time with static cars.
+"""M3 test harness: the M3 pipeline minus the safe-set projection (spline -> corridor -> MPC) driven by
+hand-placed waypoints instead of the RL policy, in MetaDrive in real time with static cars.
 
 1. Place waypoints and static cars in a small editor (top-down road in (s, d), lane lines drawn):
        python scripts/m3_harness.py edit --out configs/m3_harness/my_test.json
@@ -9,35 +9,37 @@ waypoints instead of the RL policy, in MetaDrive in real time with static cars.
    centre; Shift+click or 'c' places a car in either mode). Right click deletes the nearest item.
    "target speed (km/h)" sets the desired trajectory speed (spline reference + MPC target; press Enter).
    Buttons: Save / Undo / Clear, and Run, which saves and starts the MetaDrive run in a new process with
-   the "projection" / "corridor constraints" checkboxes and the --set box (space-separated KEY=VALUE
-   overrides) applied.
+   the "corridor constraints" / "road-aligned corridor" checkboxes and the --set box (space-separated
+   KEY=VALUE overrides) applied.
    Pan/zoom with the toolbar (click the tool again to turn it off before placing). Segments the RL could
    not produce (spacing outside 5-40 m) are orange; segments whose quintic needs more lateral accel than
    the safe set allows are red.
 
 2. Run it from the editor, or directly (MetaDrive 3D window, 10 Hz real time):
        python scripts/m3_harness.py run configs/m3_harness/overtake.json
-       python scripts/m3_harness.py run <scenario> --no-projection                  # raw waypoints -> spline
        python scripts/m3_harness.py run <scenario> --no-corridor-constraints        # MPC without the tube
        python scripts/m3_harness.py run <scenario> --corridor stock                 # M3's own corridor builder
-   The default corridor here is the harness's road-aligned one (RoadCorridor below): boxes parallel to the
-   road, edge to edge, minus lanes occupied by cars; --corridor stock uses M3's CorridorBuilder.
+       python scripts/m3_harness.py run <scenario> --set method.mpc.corridor.keepout_s=1.5
+   The default corridor here is the harness's road-aligned one (RoadCorridor below): fixed band between the
+   exterior lane centres, cut by the cars' keep-out zones; --corridor stock uses M3's CorridorBuilder.
        python scripts/m3_harness.py run <scenario> --set method.mpc.weights.lateral=4.0
        python scripts/m3_harness.py run <scenario> --no-render                      # headless, logs only
    Overlays:
        white balls   all waypoints placed in the scenario
-       green balls   this decision's waypoints after safe-set projection: what the spline actually passes
-                     through (the RL-equivalent re-spaced waypoints before projection are logged, not drawn)
-       yellow line   reference spline;  cyan line  MPC predicted path;  blue box  current corridor stage;
-       magenta boxes safe-set footprints of the cars (used by the projection)
+       yellow line   reference spline;  cyan line  MPC predicted path
+       blue lines    corridor over the MPC horizon: each stage's left/right bound on the ego centre at that
+                     stage's planned position (road corridor; --corridor stock draws the current box only)
+       magenta boxes car keep-out zones (car + keepout_s fore/aft, + margin_d sideways; road corridor only)
+   Demo mode (editor checkbox, or --demo): only the cars and the road; M toggles the overlays + text live.
    K = toggle the corridor constraints live (the blue box is hidden while they are off; the text panel
    shows the state), X = finish and save; avoid R (MetaDrive reset) and Esc (exits, no save).
    Writes runs/m3_harness/<scenario>/<timestamp>/{steps.csv, decisions.csv, summary.json, overview.png}.
 
 Waypoints reach the MPC the way the RL's do: every decision period (10 control steps) the next <= 5 placed
 waypoints more than ds_min ahead of the ego are taken, re-spaced to the RL's per-slot range
-(Δs ∈ ds_range, cumulative from the ego's s) and laterally clipped to the RL's d range, then projected,
-splined and handed to the MPC. Ego: vehicle_model static_default, no traffic, gains from configs/method/m3.yaml.
+(Δs ∈ ds_range, cumulative from the ego's s) and laterally clipped to the RL's d range, then splined and
+handed to the MPC (no safe-set projection). Ego: vehicle_model static_default, no traffic, gains from
+configs/method/m3.yaml.
 """
 
 from __future__ import annotations
@@ -78,7 +80,7 @@ def load_cfg(sc: dict, overrides: list[str]) -> dict:
     return load_config("m3", overrides=ov + list(overrides))
 
 
-def make_env(sc: dict, cfg: dict, render: bool, fps: float | None = None):
+def make_env(sc: dict, cfg: dict, render: bool, fps: float | None = None, demo: bool = False):
     from metadrive.component.pgblock.first_block import FirstPGBlock
     from metadrive.envs.top_down_env import TopDownMetaDrive
 
@@ -93,6 +95,11 @@ def make_env(sc: dict, cfg: dict, render: bool, fps: float | None = None):
         "spawn_lane_index": (FirstPGBlock.NODE_1, FirstPGBlock.NODE_2, int(sc["ego_lane"]))}}
     if fps:
         md["force_render_fps"] = float(fps)
+    if demo:   # just the cars and the road: no MetaDrive navigation marks, arrow, dashboard or FPS counter
+        md["vehicle_config"]["show_navi_mark"] = False
+        md["vehicle_config"]["show_navigation_arrow"] = False
+        md["show_interface"] = False
+        md["show_fps"] = False
     env = TopDownMetaDrive(md)
     env.reset(seed=int(sc["map_seed"]))
     return env
@@ -290,9 +297,9 @@ def cmd_edit(args):
             return
         save()
         cmd = [sys.executable, str(Path(__file__).resolve()), "run", str(out_path)]
-        proj_on, corridor_on, road_corridor = opt_box.get_status()
-        if not proj_on:
-            cmd.append("--no-projection")
+        corridor_on, road_corridor, demo = opt_box.get_status()
+        if demo:
+            cmd.append("--demo")
         if not corridor_on:
             cmd.append("--no-corridor-constraints")
         cmd += ["--corridor", "road" if road_corridor else "stock"]
@@ -311,8 +318,8 @@ def cmd_edit(args):
         b = Button(fig.add_axes([0.16 + 0.075 * i, 0.06, 0.065, 0.06]), label)
         b.on_clicked(fn)
         widgets.append(b)
-    opt_box = CheckButtons(fig.add_axes([0.39, 0.02, 0.16, 0.13]),
-                           ["projection", "corridor constraints", "road-aligned corridor"], [True, True, True])
+    opt_box = CheckButtons(fig.add_axes([0.39, 0.03, 0.16, 0.11]),
+                           ["corridor constraints", "road-aligned corridor", "demo mode"], [True, True, False])
     widgets.append(opt_box)
     set_box = TextBox(fig.add_axes([0.58, 0.06, 0.27, 0.06]), "--set ", initial="")
     widgets.append(set_box)
@@ -375,11 +382,13 @@ def tracked_objects(cars_v, ego, road, R):
 def cmd_run(args):
     from handoff.rl.methods.common import ActuationMap
     from handoff.rl.methods.m3_mpc import MPCController
-    from handoff.rl.methods.m3_safe_set import ProjectionResult, project_waypoints_detailed
-    from handoff.rl.methods.m3_spline import build_m3_reference, lane_hold_reference
+    from handoff.rl.methods.m3_spline import build_m3_reference
     from handoff.simulator.metadrive_env import build_road_frame
     from handoff.simulator.overlays import OverlayDrawer, frenet_box_polygon
-    from handoff.simulator.state import frenet_box_gap
+    from handoff.simulator.road import wrap_angle
+    from handoff.simulator.state import frenet_box_gap, frenet_velocity
+
+    import casadi as ca
 
     class HarnessMPC(MPCController):
         """M3's MPC with a switch for the corridor constraints. When off, every stage's 4 half-spaces are
@@ -387,6 +396,54 @@ def cmd_run(args):
         initial trajectory. The NLP structure is unchanged, so it can be toggled between solves."""
 
         corridor_on = True
+        _eb_prev = None    # previous heading error of the emergency-brake law (None = first e-brake step)
+
+        def emergency_brake(self, ego):
+            """Harness emergency brake: full brake, steering that puts heading first, damps it, and only gently
+            pulls toward the nearest lane centre:
+                u_s = k_h * e_psi + k_r * (e_psi - e_psi_prev) + k_l * (d_lane - d)
+            e_psi = road heading - ego heading (rad), per-step difference as damping. Gains (command units)
+            from method.mpc.ebrake_steer = [k_h, k_r, k_l], default [1.0, 0.3, 0.06]: heading and lateral are
+            the tuned M2 PID proportional gains; the old law was 1.7 * e_psi + 0.3 * (d_lane - d), no damping.
+            Also used by the MPC's own infeasibility fallback."""
+            kh, kr, kl = (float(x) for x in self.cfg.get("ebrake_steer", [1.0, 0.3, 0.06]))
+            lane_d = self.road.lane_centers[self.road.nearest_lane(ego.d)]
+            e_psi = float(wrap_angle(self.road.heading_at(ego.s) - ego.psi))
+            de = 0.0 if self._eb_prev is None else e_psi - self._eb_prev
+            self._eb_prev = e_psi
+            steer = kh * e_psi + kr * de + kl * (lane_d - ego.d)
+            return np.array([float(np.clip(steer, -1.0, 1.0)), -1.0])
+
+        def _extra_cost(self, X, tube):
+            """Barrier on the corridor's two lateral faces (rows 2 = left, 3 = right of each stage box).
+            g = distance of the ego centre to the face (b - a·p). Two zones, each 0 with zero slope at its start:
+                outer, g < δ  (0.5 m):   w       * (-ln(g/δ) + g/δ - 1)        gentle log
+                inner, g < δi (0.25 m):  w_inner * (δi/g - 1)^2                grows like 1/g^2
+            e.g. with the defaults (w 1, w_inner 10): g = 0.40 -> 0.02, 0.25 -> 0.19, 0.15 -> 4.9, 0.10 -> 23,
+            0.05 -> 161. g is floored at 1e-3 m so the terms stay finite if a solver iterate crosses the face.
+            Weights/distances from method.mpc.corridor: barrier_weight (1.0), barrier_dist (0.5),
+            barrier_inner_weight (10.0), barrier_inner_dist (0.25). With the corridor constraints off the faces
+            are 0·p <= 1e6, so both terms are 0."""
+            c = self.cfg["corridor"]
+            w = float(c.get("barrier_weight", 1.0))
+            dlt = float(c.get("barrier_dist", 0.5))
+            w_in = float(c.get("barrier_inner_weight", 10.0))
+            d_in = float(c.get("barrier_inner_dist", 0.25))
+            J = 0
+            # yaw-rate penalty: w_yaw_rate * ((psi_k - psi_{k-1}) / dt)^2 over the horizon, damping heading
+            # oscillation (method.mpc.weights.yaw_rate, default 20.0; 0 disables). On the straight freeway the
+            # reference yaw rate is ~0; on a curved road this would also resist the road's own curvature.
+            w_yr = float(self.cfg["weights"].get("yaw_rate", 20.0))
+            for k in range(1, self.N + 1):
+                J += w_yr * ((X[2, k] - X[2, k - 1]) / self.dt) ** 2
+            for k in range(1, self.N + 1):
+                for j in (2, 3):
+                    g = tube[3 * j + 2, k] - (tube[3 * j, k] * X[0, k] + tube[3 * j + 1, k] * X[1, k])
+                    gc = ca.fmax(g, 1e-3)
+                    r = gc / dlt
+                    J += w * ca.if_else(r < 1, -ca.log(r) + r - 1, 0)
+                    J += w_in * ca.if_else(gc < d_in, (d_in / gc - 1) ** 2, 0)
+            return J
 
         def _params(self, ego):
             p, ref, idx = super()._params(ego)
@@ -404,33 +461,65 @@ def cmd_run(args):
     class RoadCorridor(CorridorBuilder):
         """Harness-only corridor: fixed-width, road-aligned boxes on the ego CENTRE.
 
-        Lateral faces are static: the centres of the two exterior lanes, pulled in by `inset` (default 0):
-            d_centre in [min(lane_centers) + inset, max(lane_centers) - inset]   (= [-7.0, 0.0] by default)
-        The only change with traffic: per stage k (cars inflated by the ego half size + margins, predicted at
-        t_k), a car overlapping the box longitudinally to one side removes its lane (face at that lane's line
-        inset by W/2 + margin_d; the car's inflated edge if the trajectory point is already inside that), and a
-        car covering the trajectory point's d cuts the box longitudinally at its inflated end (else
-        cap_forward / cap_backward). A stage is blocked only if its trajectory point is inside a car; a point
-        outside the fixed band still gets the band (the MPC has to bring the centre back inside).
+        Lateral faces are static: the centres of the two exterior lanes, pulled in by `inset` (default -0.3,
+        i.e. 0.3 m wider on each side):
+            d_centre in [min(lane_centers) + inset, max(lane_centers) - inset]   (= [-7.3, +0.3] by default)
+        Car keep-out zone (the physical zone drawn on screen): the car's own footprint extended keepout_s
+        (default 1.0 m) forward and rearward along the road, and margin_d to each side:
+            zone half-length = L_car/2 + keepout_s,   zone half-width = W_car/2 + margin_d
+        The box constrains the ego CENTRE, so the zone is grown by the ego's half-size before it enters the
+        corridor (the ego body then stays out of the zone):
+            constraint half-length = zone half-length + L_ego/2,   constraint half-width = zone half-width + W_ego/2
+        keepout_s is read from method.mpc.corridor (--set method.mpc.corridor.keepout_s=..., also from the
+        editor's --set box).
+        No braking in the corridor: the stage points follow the reference with M3's speed ramp toward the
+        target speed, ignoring cars (so `corridor.brake` / `stop_buffer` are unused). Stopping is the MPC's job.
+        With traffic, per stage k (rebuilt every control step), strictly from the keep-out boxes (grown by
+        the ego half-size, so "overlap" = the ego body would touch the zone):
+          * in path (the reference passes through the box within the box's own s-range; NOT just "the stage
+            point's d is inside the box's lateral span", which wrongly caught lane changes that go around the
+            car), decided by where the car is relative to the ego NOW:
+              ahead  -> front face at the box's rear end, for every stage (also stages whose planned point is
+                        at or past the car: the box then ends behind the point, so the MPC must brake);
+              behind -> back face at the box's front end;
+              alongside -> lateral face on the ego's side of the box;
+          * left / right: a box level with the stage point (s_a < s_k < s_b) on that side shrinks the lateral
+            face to the box's side edge; as soon as no box is level with s_k it grows back to the fixed band.
+        No stage is ever blocked. A box that cannot be reached in time makes the MPC infeasible, which falls
+        back to the emergency brake (immediately with max_fallback_shift = 0).
         Every face is fixed in the world: with no car in the path the box has no front/back face (BIG), so it
-        does not slide with the trajectory point or jump at rebuilds; lane occupancy is still judged over the
-        local window [s_k - cap_backward, s_k + cap_forward].
-        Same initial trajectory and A·p <= b output as M3's CorridorBuilder."""
+        does not slide with the trajectory point or jump at rebuilds. Same A·p <= b output as M3's builder."""
 
-        inset = 0.0    # extra pull-in from the exterior lane centres (m); set from --corridor-inset
+        inset = -0.3   # pull-in from the exterior lane centres (m); negative = wider; set from --corridor-inset
         BIG = 1.0e4    # "no face" longitudinal extent (m)
 
-        def build(self, ego, reference, objects, road):
+        def zone_half(self, o):
+            """Physical keep-out zone half-sizes (along, across the road) of a car."""
             c = self.cfg
-            preds = self._predict(objects, road)
-            traj = self.initial_trajectory(ego, reference, preds)
+            return 0.5 * o.length + float(c.get("keepout_s", 1.0)), 0.5 * o.width + float(c["margin_d"])
+
+        def predict_keepout(self, ego, objects, road):
+            """Like CorridorBuilder._predict: keep-out zone grown by the ego half-size (constraint on the centre)."""
+            t = np.arange(self.K + 1) * self.dt
+            out = []
+            for o in objects:
+                sdot, ddot = frenet_velocity(o, road)
+                zl, zw = self.zone_half(o)
+                hl = zl + 0.5 * self.L
+                hw = zw + 0.5 * self.W
+                rel = float(wrap_angle(o.psi - road.heading_at(o.s)))
+                out.append((o.s + sdot * t, o.d + ddot * t, hl, hw, rel))
+            return out
+
+        def build(self, ego, reference, objects, road):
+            preds = self.predict_keepout(ego, objects, road)
+            # No braking in the corridor: the stage points follow the reference at the target-speed ramp and
+            # ignore cars; stopping for a car is left to the MPC through the world-fixed keep-out faces below.
+            traj = self.initial_trajectory(ego, reference, [])
             K = self.K
             inset = float(self.inset)
             d_lo0 = min(road.lane_centers) + inset                          # exterior (right) lane centre
             d_hi0 = max(road.lane_centers) - inset                          # exterior (left) lane centre
-            lane_gap = 0.5 * self.W + float(c["margin_d"])
-            lw = road.lane_width
-            cap_f, cap_b = float(c["cap_forward"]), float(c["cap_backward"])
             A = np.zeros((K + 1, 4, 2))
             b = np.zeros((K + 1, 4))
             corners = np.zeros((K + 1, 4, 2))
@@ -444,31 +533,27 @@ def cmd_run(args):
                     ss = [so[k] + cr * su * hl - sr * sw * hw for su, sw in ((1, 1), (1, -1), (-1, -1), (-1, 1))]
                     dd = [do[k] + sr * su * hl + cr * sw * hw for su, sw in ((1, 1), (1, -1), (-1, -1), (-1, 1))]
                     boxes.append((min(ss), max(ss), min(dd), max(dd), do[k]))
-                inside = any(sa < sk < sb and da < dk < db for sa, sb, da, db, _ in boxes)
-                if inside:
-                    blocked[k] = True
-                    um = up = wm = wp = 0.0
-                else:
-                    up, um = self.BIG, -self.BIG
-                    for sa, sb, da, db, _ in boxes:              # 1) cars in the trajectory point's path
-                        if da < dk < db:
-                            if sa >= sk:
-                                up = min(up, sa - sk)
-                            elif sb <= sk:
-                                um = max(um, sb - sk)
-                    lo, hi = d_lo0, d_hi0
-                    w_lo, w_hi = max(um, -cap_b), min(up, cap_f)   # local window for lane occupancy
-                    for sa, sb, da, db, dc in boxes:             # 2) occupied lanes beside the box
-                        if not (sa < sk + w_hi and sb > sk + w_lo) or da < dk < db:
-                            continue
-                        lane_c = road.lane_centers[road.nearest_lane(dc)]
-                        if da >= dk:      # car to the left: drop its lane
-                            cand = lane_c - lw / 2 - lane_gap
-                            hi = min(hi, cand if cand >= dk else da)
+                up, um = self.BIG, -self.BIG
+                lo, hi = d_lo0, d_hi0
+                for sa, sb, da, db, dc in boxes:
+                    # in path = the reference itself runs through the box over the box's own s-range
+                    seg = (reference.s >= sa) & (reference.s <= sb)
+                    in_path = bool(np.any((reference.d[seg] > da) & (reference.d[seg] < db)))
+                    if in_path:                                  # 1) car on the reference
+                        if sa >= ego.s:          # ahead of the ego now: stay behind its keep-out rear face
+                            up = min(up, sa - sk)
+                        elif sb <= ego.s:        # behind the ego now: stay ahead of its keep-out front face
+                            um = max(um, sb - sk)
+                        elif ego.d >= dc:        # alongside now: stay on the ego's side of it
+                            lo = max(lo, db)
+                        else:
+                            hi = min(hi, da)
+                    elif sa < sk < sb:                           # 2) left/right: boxes level with s_k
+                        if da >= dk:      # car to the left
+                            hi = min(hi, da)
                         else:             # car to the right
-                            cand = lane_c + lw / 2 + lane_gap
-                            lo = max(lo, cand if cand <= dk else db)
-                    wm, wp = lo - dk, hi - dk
+                            lo = max(lo, db)
+                wm, wp = lo - dk, hi - dk
                 extents[k] = [um, up, wm, wp]
                 h = road.heading_at(sk)
                 eu = np.array([np.cos(h), np.sin(h)])            # along the road
@@ -497,7 +582,7 @@ def cmd_run(args):
     R = float(sim["perception_range"])
     render = not args.no_render
 
-    env = make_env(sc, cfg, render=render, fps=None if args.no_render else args.fps)
+    env = make_env(sc, cfg, render=render, fps=None if args.no_render else args.fps, demo=args.demo)
     road = build_road_frame(env)
     cars_v = spawn_static_cars(env, road, sc["cars"])
     ego_cfg = sim["ego"]
@@ -513,19 +598,21 @@ def cmd_run(args):
     mpc.set_road(road)
     mpc.reset()
     mpc.corridor_on = not args.no_corridor_constraints
-    safe_cfg = dict(m["safe_set"])
-    use_projection = not args.no_projection
 
     print(f"vehicle {type(env.agent).__name__}: "
           + ", ".join(f"{k} {float(v):g}" for k, v in env.agent.get_dynamics_parameters().items()))
     print(f"scenario {args.scenario}: {len(placed)} waypoints, {len(cars_v)} static cars, "
-          f"target {v_target:.1f} m/s, projection {'on' if use_projection else 'off'}, "
+          f"target {v_target:.1f} m/s, "
           f"corridor constraints {'on' if mpc.corridor_on else 'off'} ({args.corridor} corridor)")
     if render:
         print("keys: K = toggle corridor constraints, X = finish and save "
               "(avoid R = MetaDrive reset, Esc = exit without saving)")
 
-    state = {"finish": False}
+    state = {"finish": False, "demo": bool(args.demo)}
+
+    def toggle_demo():
+        state["demo"] = not state["demo"]
+        print(f"demo mode {'ON' if state['demo'] else 'OFF'}")
 
     def toggle_corridor():
         mpc.corridor_on = not mpc.corridor_on
@@ -535,55 +622,70 @@ def cmd_run(args):
     if render:
         env.engine.accept("x", lambda: state.__setitem__("finish", True))
         env.engine.accept("k", toggle_corridor)
+        env.engine.accept("m", toggle_demo)
     drawer = None
     if render:
         drawer = OverlayDrawer(env.engine)
     placed_pts = [(float(x), float(y), 0.9) for x, y in zip(*road.to_world(placed[:, 0], placed[:, 1]))]
 
     def road_corridor_lines(ego, st):
-        """Current road-corridor stage as world-fixed lines: the two side faces over a window around the ego,
-        plus any front/back face a car creates. (Polylines; the drawer closes them by retracing.)"""
+        """The corridor the MPC is solving with: for each of its N+1 stages, the left/right bound on the ego
+        centre drawn at that stage's planned position, joined into two ribbons along the path (they step in
+        where a keep-out box narrows a stage, ahead of the car). Car-made front/back faces are drawn as
+        cross lines. Blocked stages break the ribbons. (Polylines; the drawer closes them by retracing.)"""
         tube = mpc.tube
-        sk, dk = tube.traj[st, 0], tube.traj[st, 1]
-        um, up, wm, wp = tube.extents[st]
         big = 0.5 * RoadCorridor.BIG
-        s_a = max(sk + um, ego.s - 10.0)
-        s_b = min(sk + up, ego.s + 100.0)
-        if tube.blocked[st] or s_b <= s_a:
-            return []
-        s = np.linspace(s_a, s_b, 25)
-        lines = []
-        for d in (dk + wm, dk + wp):
-            x, y = road.to_world(s, np.full_like(s, d))
-            lines.append(np.stack([x, y], axis=1))
-        for ext in (um, up):
-            if abs(ext) < big:                            # a car-made face
-                x, y = road.to_world(np.full(2, sk + ext), np.array([dk + wm, dk + wp]))
-                lines.append(np.stack([x, y], axis=1))
+        idx = np.minimum(np.arange(mpc.N + 1) + st, len(tube) - 1)
+        lines, left, right, cuts = [], [], [], set()
+
+        def flush():
+            for side in (left, right):
+                if len(side) >= 2:
+                    lines.append(np.array(side))
+                side.clear()
+
+        for k in idx:
+            if tube.blocked[k]:
+                flush()
+                continue
+            sk, dk = tube.traj[k, 0], tube.traj[k, 1]
+            um, up, wm, wp = tube.extents[k]
+            left.append(road.to_world(float(sk), float(dk + wp)))
+            right.append(road.to_world(float(sk), float(dk + wm)))
+            for ext in (um, up):
+                key = round(float(sk + ext), 1)
+                if abs(ext) < big and key not in cuts:     # a car-made front/back face
+                    cuts.add(key)
+                    x, y = road.to_world(np.full(2, sk + ext), np.array([dk + wm, dk + wp]))
+                    lines.append(np.stack([x, y], axis=1))
+        flush()
         return lines
 
     def draw(ego, ref, dec, diag, text, st):
         if not render:
+            return
+        if state["demo"]:                     # demo mode: only the cars and the road
+            drawer.lines.reset()
+            drawer.points.reset()
+            env.render()
             return
         frame = {}
         mk = (ref.s >= ego.s - 5.0) & (ref.s <= ego.s + 150.0)
         frame["ref_xy"] = np.stack([ref.x[mk], ref.y[mk]], axis=1)
         if diag.get("pred_xy") is not None:
             frame["pred_xy"] = diag["pred_xy"]
-        if dec is not None:
-            res = dec["res"]     # RL-equivalent (re-spaced) waypoints are logged but not drawn
-            pv = res.projected[res.valid]
-            if len(pv):
-                frame["wp_proj_xy"] = np.stack(road.to_world(pv[:, 0], pv[:, 1]), axis=1)
-            seen, polys = set(), []
-            for boxes in res.boxes:
-                for b in boxes:
-                    key = tuple(np.round(b, 1))
-                    if key not in seen:
-                        seen.add(key)
-                        polys.append(frenet_box_polygon(road, b))
+        if args.corridor == "road":     # keep-out zones (car + keepout_s fore/aft, + margin_d sideways)
+            polys = []
+            for o in objects:
+                zl, zw = mpc.corridor.zone_half(o)
+                polys.append(frenet_box_polygon(road, (o.s - zl, o.s + zl, o.d - zw, o.d + zw)))
             frame["boxes"] = polys
-        if not args.hide_corridor and mpc.corridor_on and args.corridor == "road":
+        line = check_line(ego)                # emergency-brake check line (orange)
+        if line is not None:
+            frame["obj_pred"] = [np.stack(road.to_world(line[0][[0, -1]], line[1][[0, -1]]), axis=1)]
+        if mpc.tube is None:
+            pass
+        elif not args.hide_corridor and mpc.corridor_on and args.corridor == "road":
             frame["tube"] = road_corridor_lines(ego, st)
         elif diag.get("tube_corners") is not None and not args.hide_corridor and mpc.corridor_on:
             frame["tube"] = list(diag["tube_corners"][:1])   # current stage only (the box the MPC is in now)
@@ -591,6 +693,34 @@ def cmd_run(args):
         drawer.points.draw_points(placed_pts, [(1.0, 1.0, 1.0, 1.0)] * len(placed_pts))
         env.render(text=text)
 
+    corr_cfg = m["mpc"]["corridor"]
+    keep_s, keep_d = float(corr_cfg.get("keepout_s", 1.0)), float(corr_cfg["margin_d"])
+
+    def check_line(ego):
+        """Straight line (s, d) from the ego centre to the next placed waypoint ahead, sampled every 0.25 m."""
+        ahead = placed[placed[:, 0] > ego.s]
+        if len(ahead) == 0:
+            return None
+        s1, d1 = ahead[0]
+        n = max(int(np.hypot(s1 - ego.s, d1 - ego.d) / 0.25), 2)
+        return np.linspace(ego.s, s1, n), np.linspace(ego.d, d1, n)
+
+    def reference_blocked(ego, ref, objects):
+        """Name of the first car whose keep-out zone (car + keepout_s fore/aft + margin_d sideways: the magenta
+        box) the straight line from the ego to the next waypoint passes through; else None."""
+        line = check_line(ego)
+        if line is None or not objects:
+            return None
+        s_line, d_line = line
+        for o in objects:
+            hl = 0.5 * o.length + keep_s
+            hw = 0.5 * o.width + keep_d
+            if np.any((np.abs(s_line - o.s) < hl) & (np.abs(d_line - o.d) < hw)):
+                return o.id
+        return None
+
+    n_ebrake = 0
+    stopped_steps = 0
     steps, decisions = [], []
     reason = "end_of_waypoints"
     s_stop = min(float(placed[-1, 0]) + 30.0, road.length - 5.0)
@@ -602,30 +732,38 @@ def cmd_run(args):
         ego = ego_state(env, road, t)
         objects, all_objects = tracked_objects(cars_v, ego, road, R)
         if k % period == 0:
+            # RL-equivalent waypoints go straight into the spline (no safe-set projection in this harness)
             raw = rl_waypoints(ego.s, placed, road, m)
-            if use_projection:
-                res = project_waypoints_detailed(raw, ego, objects, road, safe_cfg, v_cap)
-            else:
-                res = ProjectionResult(projected=raw.copy(), distances=np.zeros(len(raw)),
-                                       valid=np.ones(len(raw), bool), boxes=[[] for _ in raw], all_infeasible=False)
-            if res.all_infeasible:
-                ref = lane_hold_reference(ego, road, v_target, ds=m["spline"]["ds"])
-            else:
-                ref = build_m3_reference(ego, road, res.projected[res.valid], v_target, ds=m["spline"]["ds"],
-                                         extend=m["spline"]["extend"])
-            dec = {"raw": raw, "res": res}
-            decisions.append({
-                "t": t, "ego_s": ego.s, "k": len(raw),
-                "raw": json.dumps(np.round(raw, 2).tolist()),
-                "projected": json.dumps(np.round(np.nan_to_num(res.projected, nan=-1), 2).tolist()),
-                "valid": json.dumps(res.valid.tolist()),
-                "proj_dist_sum": float(np.sum(res.distances)), "all_infeasible": bool(res.all_infeasible)})
-        u, diag = mpc.step(ego, ref, objects)
+            ref = build_m3_reference(ego, road, raw, v_target, ds=m["spline"]["ds"], extend=m["spline"]["extend"])
+            dec = {"raw": raw}
+            decisions.append({"t": t, "ego_s": ego.s, "k": len(raw), "waypoints": json.dumps(np.round(raw, 2).tolist())})
+        # Emergency brake: the straight line from the ego to the next placed waypoint passes through a car's
+        # keep-out zone. While it is active the MPC is not solved (no stale cyan plan), its warm start is
+        # cleared, and the emergency-brake law (HarnessMPC.emergency_brake) drives.
+        blocker = reference_blocked(ego, ref, objects)
+        if blocker is not None:
+            u = mpc.emergency_brake(ego)
+            mpc.u_prev = np.array([u[0] * mpc.delta_max, actuation.command_to_accel(u[1])])
+            mpc._advance_lag(mpc.u_prev[0])
+            mpc._prev_X = mpc._prev_U = mpc._prev_lam_g = mpc._prev_lam_x = None
+            r_here = ref.at_s(ego.s)
+            diag = {"solve_time": 0.0, "status": "skipped:emergency_brake", "fallback": False,
+                    "fallback_reason": "", "tube_rebuilt": False, "tube_retry": False, "tube_blocked": 0,
+                    "tracking_error": float(abs(r_here["d"] - ego.d)), "ref_d": r_here["d"], "ref_v": float(ego.v)}
+            n_ebrake += 1
+        else:
+            u, diag = mpc.step(ego, ref, objects)
+            if diag.get("fallback_mode") != "emergency_brake":
+                mpc._eb_prev = None              # e-brake law's derivative restarts at the next e-brake
         n_fb += bool(diag["fallback"])
         # current corridor stage as lateral bounds on the ego centre (absolute d), for checking the geometry
-        st = min(max(mpc._tube_age - 1, 0), len(mpc.tube) - 1)
-        corr_d_lo = float(mpc.tube.traj[st, 1] + mpc.tube.extents[st, 2])
-        corr_d_hi = float(mpc.tube.traj[st, 1] + mpc.tube.extents[st, 3])
+        if mpc.tube is not None:
+            st = min(max(mpc._tube_age - 1, 0), len(mpc.tube) - 1)
+            corr_d_lo = float(mpc.tube.traj[st, 1] + mpc.tube.extents[st, 2])
+            corr_d_hi = float(mpc.tube.traj[st, 1] + mpc.tube.extents[st, 3])
+            corr_blocked_now = int(bool(mpc.tube.blocked[st]))
+        else:                                    # e-brake from the very first step: no corridor built yet
+            st, corr_d_lo, corr_d_hi, corr_blocked_now = 0, float("nan"), float("nan"), 0
         gaps = [frenet_box_gap(ego, o) for o in all_objects]
         min_gap = min(gaps) if gaps else np.inf
         steps.append({
@@ -637,7 +775,8 @@ def cmd_run(args):
             "tube_blocked": int(diag.get("tube_blocked", 0)), "tracking_error": diag["tracking_error"],
             "ref_d": diag["ref_d"], "ref_v": diag["ref_v"], "min_gap": min_gap, "n_objects": len(objects),
             "corridor_on": int(mpc.corridor_on), "corr_d_lo": corr_d_lo, "corr_d_hi": corr_d_hi,
-            "corr_blocked_now": int(bool(mpc.tube.blocked[st]))})
+            "ebrake_ref_blocked": int(blocker is not None),
+            "corr_blocked_now": corr_blocked_now})
         text = {
             "t": f"{t:.1f} s",
             "speed": f"{ego.v:.1f} / target {v_target:.1f} m/s",
@@ -648,6 +787,7 @@ def cmd_run(args):
             "min gap": f"{min_gap:.2f} m" if np.isfinite(min_gap) else "-",
             "tube blocked stages": f"{diag.get('tube_blocked', 0)}",
             "corridor constraints": "ON" if mpc.corridor_on else "OFF",
+            "EMERGENCY BRAKE": f"car on the reference ({blocker})" if blocker is not None else "-",
             "keys": "K corridor on/off, X finish+save",
         }
         draw(ego, ref, dec, diag, text, st)
@@ -660,13 +800,17 @@ def cmd_run(args):
         if state["finish"]:
             reason = "user_finish"
             break
+        stopped_steps = stopped_steps + 1 if ego.v < 0.1 else 0
+        if stopped_steps * dt >= 3.0:        # at a standstill for 3 s: the run cannot progress any further
+            reason = "stopped_emergency_brake" if blocker is not None else "stopped"
+            break
         if ego.s >= s_stop:
             break
     env.close()
-    save_run(args, sc, cfg, placed, steps, decisions, reason, use_projection, road)
+    save_run(args, sc, cfg, placed, steps, decisions, reason, road)
 
 
-def save_run(args, sc, cfg, placed, steps, decisions, reason, use_projection, road):
+def save_run(args, sc, cfg, placed, steps, decisions, reason, road):
     import matplotlib
 
     matplotlib.use("Agg")
@@ -689,8 +833,10 @@ def save_run(args, sc, cfg, placed, steps, decisions, reason, use_projection, ro
         reasons[f"{r}/{mode}"] = reasons.get(f"{r}/{mode}", 0) + 1
     summary = {
         "termination": reason, "steps": len(steps), "duration_s": float(col["t"][-1]),
-        "distance_m": float(col["s"][-1] - col["s"][0]), "projection": use_projection,
+        "distance_m": float(col["s"][-1] - col["s"][0]),
+        "keepout_s": float(cfg["method"]["mpc"]["corridor"].get("keepout_s", 1.0)),
         "corridor_on_pct": float(100 * np.mean(col["corridor_on"])), "corridor_type": args.corridor,
+        "ebrake_ref_blocked_steps": int(col["ebrake_ref_blocked"].sum()),
         "overrides": list(args.overrides),
         "fallbacks": int(fb.sum()), "fallback_breakdown": reasons,
         "tube_retries": int(col["tube_retry"].sum()),
@@ -702,8 +848,6 @@ def save_run(args, sc, cfg, placed, steps, decisions, reason, use_projection, ro
         "tracking_err_rms_m": float(np.sqrt(np.mean(col["tracking_error"] ** 2))),
         "tracking_err_max_m": float(np.max(col["tracking_error"])),
         "mean_speed": float(np.mean(col["v"])),
-        "projection_dist_total_m": float(sum(d["proj_dist_sum"] for d in decisions)),
-        "all_infeasible_decisions": int(sum(d["all_infeasible"] for d in decisions)),
     }
     (out / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
 
@@ -717,12 +861,6 @@ def save_run(args, sc, cfg, placed, steps, decisions, reason, use_projection, ro
     for s, d in sc["cars"]:
         a.add_patch(Rectangle((s - CAR_LENGTH / 2, d - CAR_WIDTH / 2), CAR_LENGTH, CAR_WIDTH, color="tab:blue"))
     a.plot(placed[:, 0], placed[:, 1], "o", color="crimson", label="placed waypoints")
-    for dec in decisions:
-        p = np.array(json.loads(dec["projected"]))
-        v = np.array(json.loads(dec["valid"]), bool)
-        if len(p) and v.any():
-            a.plot(p[v, 0], p[v, 1], ".", color="tab:green", ms=4)
-    a.plot([], [], ".", color="tab:green", label="projected (all decisions)")
     a.plot(col["s"], col["d"], color="k", lw=1.5, label="ego path")
     a.plot(col["s"][fb], col["d"][fb], "x", color="tab:red", label="MPC fallback")
     a.set_xlim(col["s"][0] - 5, col["s"][-1] + 30)
@@ -771,7 +909,6 @@ def main():
     e.add_argument("--target-speed", dest="target_speed_kmh", type=float, default=None, help="M3 target (km/h)")
     r = sub.add_parser("run", help="run the MPC pipeline on a scenario")
     r.add_argument("scenario")
-    r.add_argument("--no-projection", action="store_true", help="skip the safe-set projection")
     r.add_argument("--target-speed", type=float, default=None,
                    help="desired trajectory speed (km/h); overrides the scenario's target_speed_kmh")
     r.add_argument("--set", dest="overrides", action="append", default=[], metavar="KEY=VALUE",
@@ -779,14 +916,18 @@ def main():
     r.add_argument("--fps", type=float, default=10.0, help="render rate cap (10 = real time); 0 = as fast as possible")
     r.add_argument("--no-render", action="store_true", help="headless (logs only)")
     r.add_argument("--hide-corridor", action="store_true", help="do not draw the current corridor box")
+    r.add_argument("--demo", action="store_true",
+                   help="demo mode: only the cars and the road (no overlays, text panel, MetaDrive navigation "
+                        "marks/dashboard); M toggles the overlays + text live")
     r.add_argument("--no-corridor-constraints", action="store_true",
                    help="start with the MPC's corridor constraints off (toggle live with K)")
     r.add_argument("--corridor", choices=["road", "stock"], default="road",
                    help="road = harness road-aligned, edge-to-edge corridor minus occupied lanes (default); "
                         "stock = M3's CorridorBuilder (rotates with the trajectory during lane changes)")
-    r.add_argument("--corridor-inset", type=float, default=0.0,
+    r.add_argument("--corridor-inset", type=float, default=-0.3,
                    help="road corridor: pull the fixed lateral faces in from the exterior lane centres (m); "
-                        "default 0 (faces at the exterior lane centres)")
+                        "negative widens. Default -0.3 (faces 0.3 m outside the exterior lane centres: "
+                        "[-7.3, +0.3]; up to about -0.8 keeps the ego body on the road)")
     r.add_argument("--out", default=None, help="output dir (default runs/m3_harness/<scenario>/<timestamp>)")
     args = p.parse_args()
     if args.cmd == "edit":

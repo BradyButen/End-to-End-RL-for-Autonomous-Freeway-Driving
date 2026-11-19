@@ -1,11 +1,20 @@
+# Environment / build clutter
 .venv/
 __pycache__/
 *.pyc
 *.egg-info/
 .pytest_cache/
 .ruff_cache/
+
+# Working outputs (training runs, job logs, checkpoints, episode logs) stay local
 runs/
 !runs/.gitkeep
 *.npz
 *.zip
 slurm-*.out
+
+# Committed result snapshots: <MM_DD>_data/ folders are tracked in full, including the
+# checkpoints and episode logs ignored above (keep only best/final checkpoints in them).
+!/[0-9][0-9]_[0-9][0-9]_data/**/*.zip
+!/[0-9][0-9]_[0-9][0-9]_data/**/*.npz
+!/[0-9][0-9]_[0-9][0-9]_data/**/*.out

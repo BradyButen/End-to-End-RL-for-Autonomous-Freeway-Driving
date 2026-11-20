@@ -64,12 +64,13 @@ class Success(RewardTerm):
 
 
 class Collision(RewardTerm):
-    """Terminal indicator: crash with a vehicle or object. Units: 1/0."""
+    """Terminal indicator: crash with a vehicle or object, or an M3 emergency brake that ended the run
+    (``method.ebrake_ends_episode``: the e-brake means a crash was imminent). Units: 1/0."""
     name, units, terminal = "collision", "1", True
 
     def compute(self, prev, curr, objects, info, decision):
         return float(bool(info.get("crash_vehicle", False) or info.get("crash_object", False)
-                          or info.get("crash_human", False)))
+                          or info.get("crash_human", False) or info.get("emergency_brake", False)))
 
 
 class OffRoad(RewardTerm):
@@ -88,6 +89,29 @@ class LaneCenter(RewardTerm):
         road: RoadFrame = self.ctx["road"]
         dev = min(abs(curr.d - c) for c in road.lane_centers)
         return -dev / (0.5 * road.lane_width)
+
+
+class LaneChange(RewardTerm):
+    """Lanes changed this step, with the hysteresis of the ``lane_changes`` metric: a change counts once the ego
+    centre is within settle·lane_width (0.3) of a new lane's centre; counts |Δlane| (two lanes at once = 2).
+    Use a negative weight to discourage weaving. Units: lanes."""
+    name, units = "lane_change", "lanes"
+    SETTLE = 0.3
+
+    def reset(self):
+        self.stable = None
+
+    def compute(self, prev, curr, objects, info, decision):
+        road: RoadFrame = self.ctx["road"]
+        centers = road.lane_centers
+        if self.stable is None:
+            self.stable = road.nearest_lane(prev.d)
+        j = road.nearest_lane(curr.d)
+        if j != self.stable and abs(curr.d - centers[j]) < self.SETTLE * road.lane_width:
+            n = abs(j - self.stable)
+            self.stable = j
+            return float(n)
+        return 0.0
 
 
 class Jerk(RewardTerm):
@@ -133,8 +157,8 @@ class ProjectionPenalty(RewardTerm):
         return -float(np.sum(dists)) if dists is not None else 0.0
 
 
-ALL_TERMS = [Progress, Speed, SpeedTracking, Success, Collision, OffRoad, LaneCenter, Jerk, SteerRate, Time,
-             ProjectionPenalty]
+ALL_TERMS = [Progress, Speed, SpeedTracking, Success, Collision, OffRoad, LaneCenter, LaneChange, Jerk, SteerRate,
+             Time, ProjectionPenalty]
 TERM_NAMES = [t.name for t in ALL_TERMS]
 
 

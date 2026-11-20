@@ -58,7 +58,7 @@ def parse_override(text: str) -> dict:
 
 def load_config(
     method: str,
-    reward: str = "r0",
+    reward: str = "r3_fast",
     scenario: str = "freeway",
     overrides: list[str] | None = None,
     config_dir: str | Path | None = None,
@@ -89,7 +89,7 @@ def kmh(v_km_h: float) -> float:
 # --------------------------------------------------------------------------------------- script arguments
 def add_config_args(p: argparse.ArgumentParser, method_required: bool = True) -> None:
     p.add_argument("--method", required=method_required, choices=["m1", "m2", "m3", "b0"])
-    p.add_argument("--reward", default="r0", help="configs/reward/<name>.yaml")
+    p.add_argument("--reward", default="r3_fast", help="configs/reward/<name>.yaml")
     p.add_argument("--scenario", default="freeway", help="configs/scenario/<name>.yaml")
     p.add_argument("--seed", type=int, default=None, help="experiment.seed override")
     p.add_argument("--set", dest="overrides", action="append", default=[], metavar="KEY=VALUE",

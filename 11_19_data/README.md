@@ -1,7 +1,7 @@
 # 11_19_data — pilot training round 1 (2026-11-18/19)
 
 Snapshot of the first Great Lakes training round: one seed per method, reward **r0**, scenario **freeway**,
-2M control steps each. Results and next steps: [../docs/RETRAINING_PLAN.md](../docs/RETRAINING_PLAN.md).
+2M control steps each. Results and what changed for round 2: [../docs/TRAINING.md](../docs/TRAINING.md) §5.
 Code version: commit `0c4d225` plus uncommitted edits on the cluster (`git_commit.txt` says `-dirty`; run
 `git status`/`git diff` in `~/handoff` on Great Lakes to see what they were). Run settings beyond the config
 files: `n_envs=14`, `eval.n_workers=4`, `eval.freq_control_steps=100000`, `torch_threads=2`.

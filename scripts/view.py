@@ -23,7 +23,7 @@ def main():
         sp.add_argument("--topdown", action="store_true")
         sp.add_argument("--set", dest="overrides", action="append", default=[])
     lv.add_argument("--method", required=True, choices=["m1", "m2", "m3", "b0"])
-    lv.add_argument("--reward", default="r0")
+    lv.add_argument("--reward", default="r3_fast")
     lv.add_argument("--scenario", default="freeway")
     lv.add_argument("--seeds", nargs="+", type=int, default=None)
     rp.add_argument("--episode", required=True, help="logged episode .npz")

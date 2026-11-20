@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-TERMINATION_REASONS = ("success", "collision", "off_road", "timeout", "other")
+TERMINATION_REASONS = ("success", "collision", "emergency_brake", "off_road", "timeout", "other")
 
 
 def termination_reason(info: dict, truncated: bool) -> str:
@@ -12,6 +12,8 @@ def termination_reason(info: dict, truncated: bool) -> str:
         return "success"
     if info.get("crash_vehicle", False) or info.get("crash_object", False) or info.get("crash_human", False):
         return "collision"
+    if info.get("emergency_brake", False):     # M3 e-brake ended the run (method.ebrake_ends_episode)
+        return "emergency_brake"
     if info.get("out_of_road", False):
         return "off_road"
     if truncated or info.get("max_step", False):
@@ -80,6 +82,8 @@ def episode_metrics(steps: dict, decisions: dict, reason: str, dt: float, lane_c
     out["solve_time_p95"] = float(np.percentile(st, 95)) if len(st) else float("nan")
     out["solve_time_max"] = float(np.max(st)) if len(st) else float("nan")
     out["fallback_count"] = int(np.sum(np.asarray(steps.get("fallback", []), bool)))
+    gb = np.asarray(steps.get("gated_brake", []), float)
+    out["gated_brake_count"] = int(np.sum(gb[np.isfinite(gb)] > 0))
 
     pd = np.asarray(decisions.get("projection_distance_sum", []), float)
     out["projection_distance_mean"] = float(np.mean(pd)) if len(pd) else float("nan")

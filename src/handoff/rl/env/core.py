@@ -50,6 +50,10 @@ class CoreEnv(gym.Env):
         self.v_target = kmh(sim["target_speed_km_h"])
         self.v_cap = kmh(sim["v_cap_km_h"])
         self.R = float(sim["perception_range"])
+        ts = cfg["scenario"]["traffic"].get("speed_km_h")
+        self.traffic_speed_kmh = None if ts is None else float(ts)
+        self.release_all = bool(cfg["scenario"]["traffic"].get("release_all_at_reset", False))
+        self.lane_speed_offsets = [float(x) for x in cfg["scenario"]["traffic"].get("lane_speed_offset_km_h") or []]
         self.max_steering_rad = float(np.deg2rad(sim["ego"]["max_steering_deg"]))
 
         bev = cfg["observation"]["bev"]
@@ -69,6 +73,7 @@ class CoreEnv(gym.Env):
         log = cfg["logging"]
         self.full_log_eval = bool(log.get("full_log_eval", True))
         self.full_every = int(log.get("train_full_log_every", 0))
+        self.tube_every = max(1, int(log.get("tube_every", 1)))
         self.recorder = EpisodeRecorder(
             out_dir=(Path(run_dir) / "episodes") if run_dir else None,
             max_objects=int(log["max_logged_objects"]), dt=self.dt,
@@ -88,6 +93,7 @@ class CoreEnv(gym.Env):
         self.ego: EgoState | None = None
         self.objects: ObjectList = []
         self.overlay_hook = None   # viz: callable(core, decision_ctx, diag) after every control step
+        self.scripted_vehicles = []  # extra MetaDrive vehicles spawned by scripts (validation); perceived like traffic
         self._done = True
 
     # ------------------------------------------------------------------ gym API
@@ -99,7 +105,11 @@ class CoreEnv(gym.Env):
         if ep_seed is None:
             ep_seed = int(self._seed_rng.integers(*self.train_seed_range))
         self.episode_seed = int(ep_seed)
+        self.scripted_vehicles = []
         raw_obs, _ = self.md.reset(seed=self.episode_seed)
+        if self.release_all:
+            self._release_all_traffic()
+        self._apply_traffic_speed()
         self.road = build_road_frame(self.md)   # each seed has its own map
         self.reward_ctx["road"] = self.road
         self.episode_control_steps = 0
@@ -137,6 +147,11 @@ class CoreEnv(gym.Env):
         prev = self.ego
         u = np.clip(np.asarray(u, dtype=float), -1.0, 1.0)
         raw_obs, _, terminated, truncated, info = self.md.step(u)
+        self._apply_traffic_speed()
+        if diag.get("ebrake_terminal"):          # M3: emergency brake ends the run, scored as a collision
+            info = dict(info)
+            info["emergency_brake"] = True
+            terminated = True
         self.episode_control_steps += 1
         self.total_control_steps += 1
         self.ego = self._extract_ego()
@@ -161,12 +176,15 @@ class CoreEnv(gym.Env):
             "decision_index": self.episode_decisions,
             "tube_rebuilt": float(bool(diag.get("tube_rebuilt", False))),
             "tube_blocked": diag.get("tube_blocked", np.nan),
+            "gated_brake": float(bool(diag.get("gated_brake", False))),   # M3 blocked-path e-brake gate
         }
         status = str(diag.get("status", ""))
         if diag.get("fallback"):
             status = f"fallback:{diag.get('fallback_reason', '')}:{diag.get('fallback_mode', '')}"
         self.recorder.record_control(self.ego, self.objects, raw, weighted, total, extra,
-                                     pred_path=diag.get("pred_xy"), status=status, tube=diag.get("tube_full"))
+                                     pred_path=diag.get("pred_xy"), status=status,
+                                     tube=diag.get("tube_full") if self.episode_control_steps % self.tube_every == 0
+                                     else None)
         info = dict(info)
         info["reward_terms"] = raw
         if self.overlay_hook is not None:
@@ -191,6 +209,48 @@ class CoreEnv(gym.Env):
         return {"total_control_steps": self.total_control_steps, "total_decisions": self.total_decisions,
                 "total_sim_time": self.total_control_steps * self.dt, "total_episodes": self.total_episodes}
 
+    def _release_all_traffic(self) -> None:
+        """Trigger-mode placement (random positions over every block but the first, drawn from the seed), but every
+        car drives from t = 0 instead of waiting for the ego to reach its block: move all pending block groups into
+        the active list, and start each car at the traffic cruise speed along its heading."""
+        tm = self.md.engine.traffic_manager
+        for group in getattr(tm, "block_triggered_vehicles", []):
+            tm._traffic_vehicles += list(tm.get_objects(group.vehicles).values())
+        tm.block_triggered_vehicles = []
+        if self.traffic_speed_kmh is not None:
+            for veh in tm._traffic_vehicles:
+                v = self._traffic_speed_for(veh) / 3.6
+                h = float(veh.heading_theta)
+                veh.set_velocity([v * np.cos(h), v * np.sin(h)])
+
+    def _traffic_speed_for(self, veh) -> float:
+        """Cruise speed (km/h) of a traffic car: base speed + the offset of the lane it is in now
+        (scenario.traffic.lane_speed_offset_km_h, indexed by MetaDrive lane: 0 = left, next to the centre line)."""
+        v = self.traffic_speed_kmh
+        if self.lane_speed_offsets:
+            try:
+                lane = int(veh.lane_index[-1])
+            except (AttributeError, TypeError, IndexError):
+                lane = None
+            if lane is not None and 0 <= lane < len(self.lane_speed_offsets):
+                v += self.lane_speed_offsets[lane]
+        return v
+
+    def _apply_traffic_speed(self) -> None:
+        """Set the IDM cruise speed of every traffic car from its current lane (instance attribute, so the ego's
+        IDMPolicy in B0 keeps its own). IDMPolicy resets ``target_speed`` from ``NORMAL_SPEED`` each step, so
+        setting ``NORMAL_SPEED`` is enough; runs after every step, so a car that changes lanes takes on the new
+        lane's speed."""
+        if self.traffic_speed_kmh is None:
+            return
+        engine = self.md.engine
+        for veh in engine.traffic_manager._traffic_vehicles:
+            pol = engine.get_policy(veh.id)
+            v = self._traffic_speed_for(veh)
+            if pol is not None and getattr(pol, "NORMAL_SPEED", None) != v:
+                pol.NORMAL_SPEED = v
+                pol.target_speed = v
+
     # ------------------------------------------------------------------ extraction
     def _extract_ego(self) -> EgoState:
         v = self.md.agent
@@ -202,7 +262,7 @@ class CoreEnv(gym.Env):
         ego = self.md.agent
         ex, ey = ego.position
         out = []
-        for veh in self.md.engine.traffic_manager._traffic_vehicles:
+        for veh in list(self.md.engine.traffic_manager._traffic_vehicles) + list(self.scripted_vehicles):
             x, y = veh.position
             dist = float(np.hypot(x - ex, y - ey))
             if dist > self.R:

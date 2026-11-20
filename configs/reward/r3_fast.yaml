@@ -1,0 +1,30 @@
+# R3 (2026-11-19, round 2): finish fast, never crash.
+# Per control step (0.1 s): 0.1 * progress (Δs, m) - 0.1 (time) - 2 per lane changed. Terminal terms are ADDED.
+#   net per step = 0.01 * v - 0.1  -> positive above 10 m/s; arriving sooner is directly better.
+# Rough episode scores on the ~1 km freeway (progress ~ +100 total):
+#   finish at the 80 km/h cap (22 m/s, ~45 s):        +100 - 45  + 50 = ~ +105
+#   finish stuck behind 40 km/h traffic (~90 s):      +100 - 90  + 50 = ~ +60
+#   timeout (120 s, no finish):                         <= +100 - 120   = ~ -20 or less
+#   crash / off-road anywhere:                          <= +100 - 500   = ~ -400 or less
+#   each lane change: -2 (~ 2 s of time cost); a pass (out and back) = -4, so it pays when it saves > 4 s
+# => crash << timeout < slow finish < fast finish.
+experiment:
+  reward_variant: r3_fast
+
+reward:
+  name: r3_fast
+  terminal_mode: add
+  terminal_priority: [success, off_road, collision]
+  weights:
+    progress: 0.1
+    speed: 0.0
+    success: 50.0
+    off_road: -500.0
+    collision: -500.0
+    speed_tracking: 0.0
+    lane_center: 0.0
+    lane_change: -2.0
+    jerk: 0.0
+    steer_rate: 0.0
+    time: 0.1
+    projection_penalty: 0.0

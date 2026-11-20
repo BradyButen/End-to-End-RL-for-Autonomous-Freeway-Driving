@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Final evaluation of a trained checkpoint, or of B0, on the fixed evaluation seeds (spec §11.1).
 
-    python scripts/evaluate.py --method m3 --checkpoint runs/m3/r0/seed_0/<ts>/checkpoints/best.zip
+    python scripts/evaluate.py --method m3 --checkpoint runs/m3/r3_fast/seed_0/<ts>/checkpoints/best.zip
     python scripts/evaluate.py --method b0 --out runs/eval/b0
 
 The config is taken from the checkpoint's run directory (config.yaml) when available, so the evaluated

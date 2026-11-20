@@ -48,3 +48,10 @@ def method_gamma(cfg: dict) -> float:
     """γ_method = γ_ref ^ (T_decision / 0.1 s) — same lookahead in seconds for every method (spec §8)."""
     t_dec = decision_period(cfg) * float(cfg["sim"]["control_dt"])
     return float(cfg["training"]["gamma_ref"]) ** (t_dec / 0.1)
+
+
+def method_gae_lambda(cfg: dict) -> float:
+    """λ_method = λ_ref ^ (T_decision / 0.1 s) — same GAE credit-assignment window in seconds for every method
+    (a fixed per-decision λ would give M1 a 10x shorter window than M3). docs/TRAINING.md §3."""
+    t_dec = decision_period(cfg) * float(cfg["sim"]["control_dt"])
+    return float(cfg["training"]["gae_lambda_ref"]) ** (t_dec / 0.1)

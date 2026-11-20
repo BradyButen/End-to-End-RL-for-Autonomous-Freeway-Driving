@@ -21,4 +21,6 @@ method:
     integral_limit: 5.0
     speed_feedforward: true    # add a_ref -> throttle_brake feed-forward from the actuation table
 
-ppo: {}
+ppo:                           # round 2: more updates per control step (pilot: ~14 updates in 2M steps)
+  n_steps: 256                 # decisions per env per rollout (= 128 s of driving, same as M1/M3)
+  batch_size: 256

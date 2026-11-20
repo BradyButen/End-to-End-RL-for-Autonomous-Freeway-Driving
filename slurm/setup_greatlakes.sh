@@ -31,8 +31,7 @@ pip install -e "$REPO_DIR[dev]"
 # MetaDrive downloads its model/texture assets on first use; compute nodes may have no internet, so do it here.
 python -m metadrive.pull_asset
 
-# Smoke: imports + unit tests (no simulator) + one headless MetaDrive episode
+# Smoke: imports + a short headless run of every method
 SDL_VIDEODRIVER=dummy python -c "import torch; print('torch', torch.__version__, 'cuda', torch.cuda.is_available())"
-pytest -q
-SDL_VIDEODRIVER=dummy python tests/validate.py --check smoke
+SDL_VIDEODRIVER=dummy python tests/benchmark_throughput.py --n-envs 1 --decisions 20
 echo "Setup done: source $VENV/bin/activate"

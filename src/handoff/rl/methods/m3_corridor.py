@@ -72,6 +72,8 @@ class CorridorBuilder:
         c, dt, K = self.cfg, self.dt, self.K
         a_up, b_dn = float(c["accel"]), float(c["brake"])
         s_end = reference.s[-1]
+        # target speed: the reference's own (M3: the RL's v* for this decision); fixed target if it has none
+        v_goal = float(reference.v[0]) if reference.v is not None and len(reference.v) else self.v_target
 
         def path_d(s):
             return np.interp(np.minimum(s, s_end), reference.s, reference.d)
@@ -90,7 +92,7 @@ class CorridorBuilder:
         v = np.empty(K + 1)
         s[0], v[0] = ego.s, max(ego.v, 0.0)
         for k in range(1, K + 1):
-            v_des = min(v[k - 1] + a_up * dt, self.v_target, self.v_cap)
+            v_des = min(v[k - 1] + a_up * dt, v_goal, self.v_cap)
             room = fut_cap[k] - s[k - 1]
             if np.isfinite(room):
                 v_des = min(v_des, np.sqrt(2.0 * b_dn * max(room, 0.0)))
@@ -185,7 +187,161 @@ class CorridorBuilder:
         return Tube(A=A, b=b, corners=corners, traj=traj, theta=theta, blocked=blocked, extents=extents)
 
 
+class RoadCorridor(CorridorBuilder):
+    """Road-aligned corridor (M3 default, ``corridor.type: road``; developed in scripts/m3_harness.py):
+    fixed-width, road-aligned boxes on the ego CENTRE.
+
+    Lateral faces are static: the centres of the two exterior lanes, pulled in by `inset` (default -0.3,
+    i.e. 0.3 m wider on each side):
+        d_centre in [min(lane_centers) + inset, max(lane_centers) - inset]   (= [-7.3, +0.3] by default)
+    Car keep-out zone (the physical zone drawn on screen): the car's own footprint extended keepout_s
+    (default 1.0 m) forward and rearward along the road, and margin_d to each side:
+        zone half-length = L_car/2 + keepout_s,   zone half-width = W_car/2 + margin_d
+    The box constrains the ego CENTRE, so the zone is grown by the ego's half-size before it enters the
+    corridor (the ego body then stays out of the zone):
+        constraint half-length = zone half-length + L_ego/2,   constraint half-width = zone half-width + W_ego/2
+    keepout_s and inset (default -0.3) are read from method.mpc.corridor.
+    No braking in the corridor: the stage points follow the reference with M3's speed ramp toward the
+    target speed, ignoring cars (so `corridor.brake` / `stop_buffer` are unused). Stopping is the MPC's job.
+    With traffic, per stage k (rebuilt every control step), strictly from the keep-out boxes (grown by
+    the ego half-size, so "overlap" = the ego body would touch the zone):
+      * in path (the reference passes through the box within the box's own s-range; NOT just "the stage
+        point's d is inside the box's lateral span", which wrongly caught lane changes that go around the
+        car), decided by where the car is relative to the ego NOW:
+          ahead  -> front face at the box's rear end, for every stage (also stages whose planned point is
+                    at or past the car: the box then ends behind the point, so the MPC must brake);
+          behind -> back face at the box's front end;
+          alongside -> lateral face on the ego's side of the box;
+      * left / right: a box level with the stage point (s_a < s_k < s_b) on that side shrinks the lateral
+        face to the box's side edge; as soon as no box is level with s_k it grows back to the fixed band.
+    No stage is ever blocked. A box that cannot be reached in time makes the MPC infeasible, which falls
+    back to the emergency brake (immediately with max_fallback_shift = 0).
+    Every face is fixed in the world: with no car in the path the box has no front/back face (BIG), so it
+    does not slide with the trajectory point or jump at rebuilds. Same A·p <= b output as M3's builder."""
+
+    BIG = 1.0e4    # "no face" longitudinal extent (m)
+
+    def __init__(self, cfg: dict, ego_length: float, ego_width: float, dt: float, v_target: float, v_cap: float):
+        super().__init__(cfg, ego_length, ego_width, dt, v_target, v_cap)
+        self.inset = float(cfg.get("inset", -0.3))   # pull-in from the exterior lane centres (m); negative = wider
+
+    def zone_half(self, o):
+        """Physical keep-out zone half-sizes (along, across the road) of a car."""
+        c = self.cfg
+        return 0.5 * o.length + float(c.get("keepout_s", 1.0)), 0.5 * o.width + float(c["margin_d"])
+
+    def predict_keepout(self, ego, objects, road):
+        """Like CorridorBuilder._predict: keep-out zone grown by the ego half-size (constraint on the centre)."""
+        t = np.arange(self.K + 1) * self.dt
+        out = []
+        for o in objects:
+            sdot, ddot = frenet_velocity(o, road)
+            zl, zw = self.zone_half(o)
+            hl = zl + 0.5 * self.L
+            hw = zw + 0.5 * self.W
+            rel = float(wrap_angle(o.psi - road.heading_at(o.s)))
+            out.append((o.s + sdot * t, o.d + ddot * t, hl, hw, rel))
+        return out
+
+    def build(self, ego, reference, objects, road):
+        preds = self.predict_keepout(ego, objects, road)
+        # No braking in the corridor: the stage points follow the reference at the target-speed ramp and
+        # ignore cars; stopping for a car is left to the MPC through the world-fixed keep-out faces below.
+        traj = self.initial_trajectory(ego, reference, [])
+        K = self.K
+        inset = float(self.inset)
+        d_lo0 = min(road.lane_centers) + inset                          # exterior (right) lane centre
+        d_hi0 = max(road.lane_centers) - inset                          # exterior (left) lane centre
+        A = np.zeros((K + 1, 4, 2))
+        b = np.zeros((K + 1, 4))
+        corners = np.zeros((K + 1, 4, 2))
+        blocked = np.zeros(K + 1, bool)
+        extents = np.zeros((K + 1, 4))
+        for k in range(K + 1):
+            sk, dk = traj[k, 0], traj[k, 1]
+            boxes = []    # inflated cars as road-frame AABBs (s_a, s_b, d_a, d_b), absolute
+            for so, do, hl, hw, rel in preds:
+                cr, sr = np.cos(rel), np.sin(rel)
+                ss = [so[k] + cr * su * hl - sr * sw * hw for su, sw in ((1, 1), (1, -1), (-1, -1), (-1, 1))]
+                dd = [do[k] + sr * su * hl + cr * sw * hw for su, sw in ((1, 1), (1, -1), (-1, -1), (-1, 1))]
+                boxes.append((min(ss), max(ss), min(dd), max(dd), do[k]))
+            up, um = self.BIG, -self.BIG
+            lo, hi = d_lo0, d_hi0
+            for sa, sb, da, db, dc in boxes:
+                # in path = the reference itself runs through the box over the box's own s-range
+                seg = (reference.s >= sa) & (reference.s <= sb)
+                in_path = bool(np.any((reference.d[seg] > da) & (reference.d[seg] < db)))
+                if in_path:                                  # 1) car on the reference
+                    if sa >= ego.s:          # ahead of the ego now: stay behind its keep-out rear face
+                        up = min(up, sa - sk)
+                    elif sb <= ego.s:        # behind the ego now: stay ahead of its keep-out front face
+                        um = max(um, sb - sk)
+                    elif ego.d >= dc:        # alongside now: stay on the ego's side of it
+                        lo = max(lo, db)
+                    else:
+                        hi = min(hi, da)
+                elif sa < sk < sb:                           # 2) left/right: boxes level with s_k
+                    if da >= dk:      # car to the left
+                        hi = min(hi, da)
+                    else:             # car to the right
+                        lo = max(lo, db)
+            wm, wp = lo - dk, hi - dk
+            extents[k] = [um, up, wm, wp]
+            h = road.heading_at(sk)
+            eu = np.array([np.cos(h), np.sin(h)])            # along the road
+            ew = np.array([-np.sin(h), np.cos(h)])           # left of the road
+            cw = np.array(road.to_world(sk, dk))
+            A[k] = [eu, -eu, ew, -ew]
+            b[k] = [up + eu @ cw, -um - eu @ cw, wp + ew @ cw, -wm - ew @ cw]
+            corners[k] = [cw + um * eu + wm * ew, cw + up * eu + wm * ew, cw + up * eu + wp * ew,
+                          cw + um * eu + wp * ew]
+        return Tube(A=A, b=b, corners=corners, traj=traj, theta=np.zeros(K + 1), blocked=blocked,
+                    extents=extents)
+
+
 def reference_xy(reference: Reference, s: np.ndarray):
     s_end = reference.s[-1]
     sc = np.minimum(s, s_end)
     return np.interp(sc, reference.s, reference.x), np.interp(sc, reference.s, reference.y)
+
+
+def path_blocked(ego: EgoState, waypoints: np.ndarray, objects: ObjectList, keepout_s: float,
+                 margin_d: float, road: RoadFrame | None = None, max_decel: float = 6.0,
+                 ego_length: float = 4.515) -> str | None:
+    """Emergency-brake gate for M3: id of the first car that (1) sits in the planned path and (2) the ego is
+    closing on too fast to stop for; None otherwise.
+
+    (1) In path: the straight line (s, d) from the ego centre to the next waypoint ahead (sampled every 0.25 m)
+        crosses the car's keep-out zone (car + keepout_s fore/aft, + margin_d sideways). Only cars whose zone
+        starts ahead of the ego's front bumper count (cars alongside/behind are the corridor's job).
+    (2) Too fast: with closing speed Δv = ṡ_ego − ṡ_car (along the road) and gap g = zone rear − ego front,
+        the deceleration needed to match the car's speed before the zone is a = Δv² / (2 g). The gate fires
+        when Δv > 0 and (g <= 0 or a > max_decel). A car at the same speed or pulling away never fires it, so
+        the RL can follow a lead by placing waypoints behind (or even past) it while the MPC holds the gap;
+        a stopped car fires it only once stopping needs more than max_decel.
+    Without ``road`` (static-car callers), object speeds are taken as 0 and the ego speed as v."""
+    wps = np.asarray(waypoints, dtype=float).reshape(-1, 2)
+    ahead = wps[wps[:, 0] > ego.s]
+    if len(ahead) == 0 or not objects:
+        return None
+    s1, d1 = ahead[0]
+    n = max(int(np.hypot(s1 - ego.s, d1 - ego.d) / 0.25), 2)
+    s_line, d_line = np.linspace(ego.s, s1, n), np.linspace(ego.d, d1, n)
+    v_ego = frenet_velocity(ego, road)[0] if road is not None else ego.v
+    front = ego.s + 0.5 * ego_length
+    for o in objects:
+        hl = 0.5 * o.length + keepout_s
+        hw = 0.5 * o.width + margin_d
+        rear = o.s - hl
+        if rear < front - 0.5 * ego_length:          # zone starts behind the ego centre: alongside / behind
+            continue
+        if not np.any((np.abs(s_line - o.s) < hl) & (np.abs(d_line - o.d) < hw)):
+            continue
+        v_obj = frenet_velocity(o, road)[0] if road is not None else 0.0
+        closing = v_ego - v_obj
+        if closing <= 0.0:
+            continue
+        gap = rear - front
+        if gap <= 0.0 or closing**2 / (2.0 * gap) > max_decel:
+            return o.id
+    return None

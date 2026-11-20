@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Train PPO for one (method, reward variant, seed).
 
-    python scripts/train.py --method m3 --reward r0 --seed 0 --set training.n_envs=8
+    python scripts/train.py --method m3 --reward r3_fast --seed 0 --set training.n_envs=8
 """
 
 import argparse

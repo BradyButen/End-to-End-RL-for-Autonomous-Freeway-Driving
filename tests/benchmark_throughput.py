@@ -23,7 +23,9 @@ from handoff.rl.env.factory import env_factory  # noqa: E402
 
 
 def bench(method: str, n_envs: int, n_decisions: int, overrides) -> dict:
-    cfg = load_config(method, overrides=overrides)
+    # random actions: keep M3 episodes running through emergency brakes, otherwise resets dominate the timing
+    extra = ["method.ebrake_ends_episode=false"] if method == "m3" else []
+    cfg = load_config(method, overrides=extra + list(overrides))
     fns = [env_factory(cfg, rank=i) for i in range(n_envs)]
     vec = DummyVecEnv(fns) if n_envs == 1 else SubprocVecEnv(fns, start_method="spawn")
     vec.seed(0)

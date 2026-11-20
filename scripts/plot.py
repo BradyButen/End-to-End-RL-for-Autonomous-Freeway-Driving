@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """Analysis plots.
 
-    python scripts/plot.py curves runs/m1/r0/seed_*/* runs/m3/r0/seed_*/* --metric success --x control_steps
-    python scripts/plot.py table runs/*/r0/seed_*/*/final_eval/episodes.csv runs/eval/b0/episodes.csv
+    python scripts/plot.py curves runs/m1/r3_fast/seed_*/* runs/m3/r3_fast/seed_*/* --metric success --x control_steps
+    python scripts/plot.py table runs/*/r3_fast/seed_*/*/final_eval/episodes.csv runs/eval/b0/episodes.csv
     python scripts/plot.py episode runs/.../episodes/<id>.npz
 """
 

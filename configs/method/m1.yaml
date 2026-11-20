@@ -6,4 +6,8 @@ method:
   name: m1
   decision_period: 1           # control steps per RL decision
 
-ppo: {}
+ppo:                           # round 2: smaller, stabler updates (pilot approx_kl ~0.17, clip_fraction 0.4-0.5)
+  n_steps: 1280                # decisions per env per rollout = 128 s of driving, same as M2 (256 x 0.5 s), M3 (128 x 1 s)
+  n_epochs: 4
+  batch_size: 512
+  target_kl: 0.03

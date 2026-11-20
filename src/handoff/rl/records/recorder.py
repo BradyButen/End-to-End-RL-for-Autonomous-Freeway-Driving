@@ -19,7 +19,7 @@ from handoff.simulator.state import EGO_FIELDS, OBJECT_FIELDS, EgoState, pack_ob
 
 STEP_SCALARS = ("tracking_error", "solve_time", "fallback", "min_gap", "min_ttc", "ref_d", "ref_v", "ref_psi",
                 "applied_steering", "applied_throttle", "cmd_steering", "cmd_throttle", "decision_index",
-                "tube_rebuilt", "tube_blocked", "reward")
+                "tube_rebuilt", "tube_blocked", "gated_brake", "reward")
 
 
 class EpisodeRecorder:

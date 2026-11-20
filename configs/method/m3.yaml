@@ -1,4 +1,6 @@
-# M3: RL picks up to 5 sparse Frenet waypoints; safe-set projection; spline; MPC with collision avoidance.
+# M3: RL picks up to 5 sparse Frenet waypoints + a target speed v*; spline; MPC in the road-aligned corridor,
+# with the blocked-path emergency-brake gate. Same pipeline as scripts/m3_harness.py (2026-11-19); the safe-set
+# projection is off (harness-exact).
 experiment:
   method: m3
 
@@ -7,9 +9,17 @@ method:
   decision_period: 10          # N3 control steps (1.0 s); fixed-period trigger (DECISIONS D-04)
   n_slots: 5
   ds_range: [5.0, 40.0]        # per-slot Δs (m)
+  speed_range_km_h: [20.0, 80.0]  # RL speed channel v*: spline speed, corridor speed ramp, MPC target AND hard
+                               # speed ceiling. Floor 20 km/h: slowing below that for traffic is the corridor/MPC's
+                               # job (the lead's keep-out face), so the RL cannot "park" to avoid risk.
+  ebrake_gate: true            # emergency-brake (no MPC solve) when a car in the planned path (line ego -> next
+                               # waypoint crosses its keep-out zone) is closed on faster than ebrake_gate_decel allows
+  ebrake_gate_decel: 6.0       # m/s^2; gate fires when Δv²/(2·gap) exceeds this (MPC can plan down to -8)
+  ebrake_ends_episode: true    # the gate, or an emergency brake after an INFEASIBLE MPC, ends the episode as
+                               # "emergency_brake" (collision penalty); solver timeouts/failures never do
   lateral_margin: 1.0
   safe_set:
-    enabled: true              # false only for diagnostics (MPC-standalone validation)
+    enabled: false             # off: RL waypoints go straight to the spline (harness-exact, 2026-11-19)
     edge_margin: 0.2           # extra clearance to road edge beyond ego half-width (m)
     obj_margin_s: 2.0          # longitudinal inflation of object footprints (m)
     obj_margin_d: 0.5          # lateral inflation (m)
@@ -36,12 +46,24 @@ method:
       steer_rate: 20.0
       accel_rate: 0.5
       terminal_factor: 3.0
+      yaw_rate: 20.0           # ((psi_k - psi_{k-1})/dt)^2, damps heading oscillation (harness)
     accel_bounds: [-8.0, 2.5]  # m/s^2 (was -6; -8 is about where MetaDrive braking stops being linear)
     max_lat_accel: 4.0         # m/s^2, |v² tan(δ)/L| bound
+    ebrake_steer: [1.0, 0.3, 0.06]   # e-brake steering: heading, heading-rate damping, lane pull (command units)
+    timeout_fallback_shift: 5  # solver timeout / numerical failure: replay the previous plan this many steps
+                               # before an (episode-safe) emergency brake
+    ceiling_brake: 4.0         # m/s^2; the v* speed ceiling ramps down from the current speed at this rate
     max_fallback_shift: 0      # steps of a stale plan to replay on a failed solve before emergency brake (was 5;
                                # 0 = brake immediately when no feasible plan exists)
     steer_rate_limit: 0.6      # rad/s
     corridor:                  # hard convex tube: 4 half-spaces per stage on the ego centre (DECISIONS D-13)
+      type: road               # road = road-aligned corridor (RoadCorridor, harness default); stock = CorridorBuilder
+      inset: -0.3              # road: lateral faces = exterior lane centres pulled in by this (negative = wider)
+      keepout_s: 1.0           # road: car keep-out zone extends this far fore/aft of the car (m); also the gate
+      barrier_weight: 1.0      # log barrier on the lateral faces within barrier_dist of them
+      barrier_dist: 0.5
+      barrier_inner_weight: 10.0
+      barrier_inner_dist: 0.25
       horizon: 5.5             # s; must cover MPC horizon + rebuild period (51 stages needed for N = 50; was 3.0)
       rebuild_period: 1        # control steps between tube rebuilds: every step (was 10; 2026-11-19)
       margin_s: 1.0            # car inflation beyond ego half-length (m)
@@ -56,8 +78,12 @@ method:
       stop_buffer: 2.0         # stop this far behind the inflated footprint of a blocking car (m)
     solver:
       max_iter: 100
-      max_cpu_time: 0.1        # IPOPT CPU limit (s); exceeding -> fallback
+      max_cpu_time: 0.1        # IPOPT CPU limit (s, process CPU time, independent of node load); exceeding ->
+                               # timeout fallback (stale plan, never ends the episode). Slow but successful
+                               # solves are always used.
       tol: 0.001
       print_level: 0
 
-ppo: {}
+ppo:                           # round 2: more updates per control step (pilot: ~7 updates in 2M steps)
+  n_steps: 128                 # decisions per env per rollout (= 128 s of driving, same as M1/M2)
+  batch_size: 256

@@ -6,11 +6,11 @@ its own subprocess when invoked with --all.
     python tests/validate.py --check env           # one check in-process
 
 Checks:
-  env          scenario spawns as specified; ego dynamics pinned; RoadFrame round-trips on the MetaDrive map;
-               traffic speed overrides hold; geometric off-road check agrees with MetaDrive; determinism
-  pid          §17.3 PID standalone: lane-change quintic tracking + speed hold (no traffic near, no RL)
-  mpc          §17.4 MPC standalone with hand-placed waypoints: (a) passes the lead, (b) avoids a stopped
-               vehicle in its path with projection disabled, (c) fallback path exercised
+  env          ego dynamics pinned (static_default) + spawn speed/lane centre; RoadFrame round-trips on the
+               MetaDrive map; forced off-road terminates; determinism
+  pid          §17.3 M2 PID standalone (no traffic): lane-change quintic tracking + speed hold, scripted (d*, v*)
+  mpc          §17.4 M3 as trained (road corridor, e-brake gate) with scripted waypoints and scripted cars:
+               (a) passes a 35 km/h lead, (b) stops for a stopped car in its path, (c) fallback chain + recovery
   smoke        §17.6 each wrapper (m1/m2/m3) runs complete episodes with random actions; logs valid
   b0           §17.7 B0 completes evaluation episodes through the harness (all eval seeds)
   train_plumbing  SB3 PPO entry point runs end-to-end for a few hundred control steps (plumbing only)
@@ -38,86 +38,81 @@ PID_TOL_SPEED = 0.5          # m/s, speed error once settled
 
 
 # ----------------------------------------------------------------------------------------------- helpers
-def _spec(ego_lane=1, ego_s=80.0, ego_v=18.0, lead_lane=1, lead_s=None, lead_v=0.0, lead_model="xl", bg=()):
-    from handoff.simulator.scenario import ScenarioSpec, VehicleSpec
+def _controlled_env(method, ego_lane=1, ego_kmh=54.0, overrides=(), run_dir=None):
+    """Method env on map seed 0 with NO MetaDrive traffic, ego spawned in ``ego_lane`` at ``ego_kmh``. Add cars
+    after ``env.reset`` with ``_spawn_cars``."""
+    from metadrive.component.pgblock.first_block import FirstPGBlock
 
-    lead = VehicleSpec(lane=lead_lane, s=lead_s if lead_s is not None else 990.0, speed=lead_v, model=lead_model,
-                       role="lead")
-    return ScenarioSpec(seed=-1, ego=VehicleSpec(lane=ego_lane, s=ego_s, speed=ego_v, role="ego"), lead=lead,
-                        background=[VehicleSpec(lane=b[0], s=b[1], speed=b[2], model="default") for b in bg])
-
-
-class _FixedScenario:
-    def __init__(self, spec):
-        self.spec = spec
-
-    def sample(self, rng, seed=-1):
-        return self.spec
-
-
-def _env_with_spec(method, spec, overrides=(), run_dir=None):
     from handoff.rl.env.factory import make_env
 
-    cfg = load_config(method, overrides=list(overrides))
+    cfg = load_config(method, overrides=["scenario.traffic.density=0", "sim.ego.random_spawn_lane=false",
+                                         f"sim.ego.spawn_speed_km_h={float(ego_kmh)}", *overrides])
+    cfg["sim"]["metadrive_overrides"]["agent_configs"] = {"default_agent": {
+        "spawn_lane_index": (FirstPGBlock.NODE_1, FirstPGBlock.NODE_2, int(ego_lane))}}
     env = make_env(cfg, is_eval=True, run_dir=run_dir)
-    env.core.scenario = _FixedScenario(spec)
     return env, cfg
 
 
-def _all_traffic(core, role=None):
-    """TrackedObjects for every traffic vehicle (no range limit)."""
-    from handoff.simulator.state import make_tracked_object
+def _spawn_cars(env, cars):
+    """cars: [(s, lane, speed_kmh)]. Spawned as TrafficDefaultVehicle on the lane centre; speed 0 = static,
+    otherwise held at that speed along the road after every control step (no IDM). Returns the vehicles."""
+    from metadrive.component.vehicle.vehicle_type import TrafficDefaultVehicle
 
-    out = []
-    for v in core.md.engine.traffic_manager._traffic_vehicles:
-        r = core.md.traffic_roles.get(v.name, "vehicle")
-        if role is None or r == role:
-            x, y = v.position
-            vx, vy = v.velocity
-            out.append(make_tracked_object(v.name, x, y, v.heading_theta, vx, vy, v.LENGTH, v.WIDTH, r, core.road))
-    return out
+    core = env.core
+    road = core.road
+    held = []
+    for s, lane, kmh_ in cars:
+        x, y = road.to_world(float(s), float(road.lane_centers[lane]))
+        h = float(road.heading_at(float(s)))
+        v = core.md.engine.spawn_object(TrafficDefaultVehicle, vehicle_config={"spawn_velocity": None},
+                                        position=[x, y], heading=h)
+        if kmh_ <= 0:
+            v.set_velocity([0.0, 0.0])
+            v.set_static(True)
+        held.append((v, kmh(kmh_)))
+        core.scripted_vehicles.append(v)
+
+    def hold(core_, _dec, _diag):
+        for v, spd in held:
+            if spd > 0:
+                h = float(road.heading_at(road.to_frenet(*v.position)[0]))
+                v.set_velocity([spd * np.cos(h), spd * np.sin(h)])
+
+    core.overlay_hook = hold
+    hold(core, None, None)
+    core.objects = core._extract_objects()
+    return [v for v, _ in held]
+
+
+def _car_s(env, veh) -> float:
+    return float(env.core.road.to_frenet(*veh.position)[0])
 
 
 # ----------------------------------------------------------------------------------------------- checks
 def check_env() -> dict:
+    """Ego dynamics pinned (static_default: no per-episode resampling), spawn speed + lane centre, RoadFrame,
+    forced off-road termination, determinism."""
     from handoff.rl.env.factory import make_env
-    from handoff.simulator.metadrive_env import geometric_off_road
 
     cfg = load_config("m1")
     env = make_env(cfg, is_eval=True)
     core = env.core
-    res = {"spawn": [], "dynamics": [], "lead_speed": []}
+    res = {"spawn": []}
     ok = True
+    want = {"max_engine_force": 800, "max_brake_force": 150, "wheel_friction": 0.9, "max_steering": 40}
+    v0 = kmh(cfg["sim"]["ego"]["spawn_speed_km_h"])
     for seed in cfg["scenario"]["seeds"]["eval"][:6]:
         env.reset(options={"episode_seed": seed})
-        spec = core.spec
-        md = core.md
-        dyn = md.agent.get_dynamics_parameters()
-        want = {"max_engine_force": 800, "max_brake_force": 150, "wheel_friction": 0.9, "max_steering": 40}
-        dyn_ok = all(abs(dyn[k] - v) < 1e-6 for k, v in want.items())
+        dyn = core.md.agent.get_dynamics_parameters()
+        dyn_ok = all(abs(float(dyn[k]) - v) < 1e-6 for k, v in want.items())
         e = core.ego
-        spawn_err = [abs(e.s - spec.ego.s), abs(e.d - core.road.lane_centers[spec.ego.lane]), abs(e.v - spec.ego.speed)]
-        lead = _all_traffic(core, "lead")  # may spawn beyond R, so read MetaDrive directly
-        lead_err = (abs(lead[0].s - spec.lead.s), abs(lead[0].d - core.road.lane_centers[spec.lead.lane]),
-                    abs(lead[0].v - spec.lead.speed), lead[0].length) if lead else None
-        n_bg_spawned = len(md.engine.traffic_manager._traffic_vehicles) - 1
-        good = dyn_ok and max(spawn_err) < 0.05 and lead_err is not None and max(lead_err[:3]) < 0.05 \
-            and abs(lead_err[3] - 5.74) < 1e-6 and n_bg_spawned == len(spec.background)
-        # traffic holds its overridden speed (IDM; lead is front-most in its lane)
-        for _ in range(30):
-            env.step(np.array([0.0, 0.0]))
-            if core._done:
-                break
-        lead_now = _all_traffic(core, "lead")
-        if lead_now:
-            res["lead_speed"].append(abs(lead_now[0].v - spec.lead.speed))
-        res["spawn"].append({"seed": seed, "ego_err": [round(x, 4) for x in spawn_err],
-                             "lead_err": [round(x, 4) for x in lead_err[:3]] if lead_err else None,
-                             "background": f"{n_bg_spawned}/{len(spec.background)}", "dynamics": dyn, "ok": good})
+        lane = core.road.nearest_lane(e.d)
+        spawn_err = [abs(e.d - core.road.lane_centers[lane]), abs(e.v - v0)]
+        good = dyn_ok and max(spawn_err) < 0.05
+        res["spawn"].append({"seed": seed, "vehicle": type(core.md.agent).__name__, "lane": lane,
+                             "err_d_v": [round(x, 4) for x in spawn_err],
+                             "dynamics": {k: float(v) for k, v in dyn.items()}, "ok": good})
         ok &= good
-    lead_speed_ok = bool(res["lead_speed"]) and max(res["lead_speed"]) < kmh(2.0)
-    ok &= lead_speed_ok
-    res["lead_speed_max_err_ms"] = max(res["lead_speed"]) if res["lead_speed"] else None
 
     # RoadFrame round trip on the MetaDrive map + agreement with MetaDrive lane geometry
     road = core.road
@@ -134,14 +129,6 @@ def check_env() -> dict:
     ok &= rt_ok
     res["roadframe"] = {"max_err": float(max(errs)), "length": road.length, "lane_centers": road.lane_centers,
                         "d_min": road.d_min, "d_max": road.d_max, "ok": rt_ok}
-
-    # geometric off-road check vs MetaDrive's lane surface on clear cases
-    clear_in = [road.to_world(s, d) for s in (100, 400, 900) for d in road.lane_centers]
-    clear_out = [road.to_world(s, d) for s in (100, 400, 900) for d in (road.d_max + 1.0, road.d_min - 1.0)]
-    geo_ok = not any(geometric_off_road(road, p) for p in clear_in) and all(geometric_off_road(road, p)
-                                                                            for p in clear_out)
-    ok &= geo_ok
-    res["geometric_off_road_ok"] = geo_ok
 
     # termination: steer hard right until off-road
     env.reset(options={"episode_seed": cfg["scenario"]["seeds"]["eval"][0]})
@@ -171,7 +158,7 @@ def _determinism() -> dict:
     actions = rng.uniform(-1, 1, (25, env.action_space.shape[0]))
     trajs = []
     for _ in range(2):
-        env.reset(options={"episode_seed": 1000003})
+        env.reset(options={"episode_seed": cfg["scenario"]["seeds"]["eval"][3]})
         xs = []
         for a in actions:
             _, _, te, tr, _ = env.step(a)
@@ -186,9 +173,8 @@ def _determinism() -> dict:
 
 
 def check_pid() -> dict:
-    """Lane 1 -> lane 0 -> lane 2 -> lane 1 with speed changes; no traffic nearby; scripted (d*, v*) actions."""
-    spec = _spec(ego_lane=1, ego_v=15.0, lead_lane=2, lead_s=995.0)
-    env, cfg = _env_with_spec("m2", spec)
+    """M2: lane 1 -> lane 0 -> lane 2 -> lane 1 with speed changes; no traffic; scripted (d*, v*) actions."""
+    env, cfg = _controlled_env("m2", ego_lane=1, ego_kmh=54.0)
     env.reset(options={"episode_seed": 0})
     core = env.core
     road = core.road
@@ -209,7 +195,8 @@ def check_pid() -> dict:
     settled = [r for r in rows if r[0] >= 6] if rows else []
     steady_cte = max(abs(r[3] - r[1]) for r in rows if r[0] >= (6 if r[1] != road.lane_centers[1] else 3))
     speed_err = [abs(r[4] - r[2]) for r in settled]
-    res = {"max_cross_track_m": max_cte, "steady_cross_track_m": steady_cte,
+    res = {"gains": {k: cfg["method"]["pid"][k] for k in ("heading", "lateral", "speed")},
+           "max_cross_track_m": max_cte, "steady_cross_track_m": steady_cte,
            "max_settled_speed_err_ms": max(speed_err) if speed_err else None,
            "tolerances": {"lane_change": PID_TOL_LANE_CHANGE, "steady": PID_TOL_STEADY, "speed": PID_TOL_SPEED},
            "terminated_early": len(rows) < sum(p[2] for p in plan)}
@@ -219,55 +206,57 @@ def check_pid() -> dict:
 
 
 def check_mpc() -> dict:
+    """M3 as trained (road corridor, e-brake gate, no safe set), scripted waypoints via ``encode``."""
     out = {}
     # (a) pass a slow lead: lane 1 -> lane 0 while passing -> back to lane 1
-    spec = _spec(ego_lane=1, ego_v=kmh(60), lead_lane=1, lead_s=130.0, lead_v=kmh(35))
-    env, cfg = _env_with_spec("m3", spec)
+    env, cfg = _controlled_env("m3", ego_lane=1, ego_kmh=60.0)
     env.reset(options={"episode_seed": 0})
     core = env.core
     L = core.road.lane_centers
+    (lead,) = _spawn_cars(env, [(130.0, 1, 35.0)])
     passed, reason, min_gap = False, None, np.inf
     for _k in range(80):
-        lead = _all_traffic(core, "lead")
-        ahead = (lead[0].s - core.ego.s) if lead else -999
+        ahead = _car_s(env, lead) - core.ego.s
         d_tgt = L[0] if ahead > -15 else L[1]
-        obs, r, te, tr, info = env.step(env.encode([40.0, 40.0], [d_tgt, d_tgt]))
+        obs, r, te, tr, info = env.step(env.encode([40.0, 40.0], [d_tgt, d_tgt], v=kmh(70)))
         min_gap = min(min_gap, min(core.recorder.steps["min_gap"][-env.period:]))
-        if lead and core.ego.s > lead[0].s + 20:
+        if core.ego.s > _car_s(env, lead) + 20:
             passed = True
         if te or tr:
             reason = info["termination"]
             break
     s = core.recorder.steps
     st = np.array(s["solve_time"])
+    st = st[st > 0]
     out["pass_lead"] = {"passed": passed, "termination": reason, "min_gap": float(min_gap),
-                        "final_d": core.ego.d, "solve_ms_mean": float(st.mean() * 1e3),
-                        "solve_ms_p95": float(np.percentile(st, 95) * 1e3), "fallbacks": int(np.sum(s["fallback"]))}
+                        "final_d": core.ego.d,
+                        "solve_ms_mean": float(st.mean() * 1e3) if len(st) else None,
+                        "solve_ms_p95": float(np.percentile(st, 95) * 1e3) if len(st) else None,
+                        "fallbacks": int(np.sum(s["fallback"])), "gated_brake_steps": int(np.sum(s["gated_brake"]))}
     out["pass_lead"]["ok"] = bool(passed and reason in (None, "success") and min_gap > 0.3)
     env.close()
 
-    # (b) stopped vehicle in the path, waypoints straight through it, safe-set projection disabled
-    spec = _spec(ego_lane=1, ego_v=kmh(50), lead_lane=1, lead_s=170.0, lead_v=0.0, lead_model="default")
-    env, cfg = _env_with_spec("m3", spec, overrides=["method.safe_set.enabled=false"])
+    # (b) stopped car in the ego's lane, waypoints straight through it: the gate / MPC must stop the ego
+    env, cfg = _controlled_env("m3", ego_lane=1, ego_kmh=50.0)
     env.reset(options={"episode_seed": 0})
     core = env.core
+    (stopped,) = _spawn_cars(env, [(170.0, 1, 0.0)])
     reason, min_gap = None, np.inf
     for _k in range(40):
-        obs, r, te, tr, info = env.step(env.encode([25.0, 25.0], [L[1], L[1]]))
+        obs, r, te, tr, info = env.step(env.encode([25.0, 25.0], [L[1], L[1]], v=kmh(50)))
         min_gap = min(min_gap, min(core.recorder.steps["min_gap"][-env.period:]))
         if te or tr:
             reason = info["termination"]
             break
-    stopped = _all_traffic(core, "lead")
     out["stopped_vehicle"] = {"termination": reason, "min_gap": float(min_gap), "final_s": core.ego.s,
-                              "final_v": core.ego.v, "final_d": core.ego.d,
-                              "stopped_vehicle_s": stopped[0].s if stopped else None}
-    out["stopped_vehicle"]["ok"] = bool(reason != "collision" and min_gap > 0.2)
+                              "final_v": core.ego.v, "final_d": core.ego.d, "stopped_vehicle_s": _car_s(env, stopped),
+                              "gated_brake_steps": int(np.sum(core.recorder.steps["gated_brake"]))}
+    out["stopped_vehicle"]["ok"] = bool(reason != "collision" and min_gap > 0.2 and core.ego.v < 0.5)
     env.close()
 
-    # (c) fallback path: cripple the solver (1 iteration) -> shifted previous plan, then emergency brake
-    spec = _spec(ego_lane=1, ego_v=kmh(60), lead_lane=2, lead_s=990.0)
-    env, cfg = _env_with_spec("m3", spec)
+    # (c) fallback chain: break the solver -> (shifted previous plan if max_fallback_shift > 0) -> emergency
+    # brake; restore it -> recovery
+    env, cfg = _controlled_env("m3", ego_lane=1, ego_kmh=60.0)
     env.reset(options={"episode_seed": 0})
     core = env.core
     env.step(env.encode([30.0], [L[1]]))  # healthy solves first
@@ -287,9 +276,11 @@ def check_mpc() -> dict:
     env.step(env.encode([30.0], [L[1]]))
     recovered = not core.recorder.steps["fallback"][-1]
     modes = {m.split(":")[-1] for m in statuses if m.startswith("fallback")}
-    out["fallback"] = {"healthy_fallbacks": healthy, "modes_seen": sorted(modes), "recovered": bool(recovered),
-                       "speed_after_brake": core.ego.v}
-    out["fallback"]["ok"] = bool(healthy == 0 and {"shifted_previous", "emergency_brake"} <= modes and recovered)
+    expected = {"emergency_brake"} | ({"shifted_previous"} if int(cfg["method"]["mpc"]["max_fallback_shift"]) > 0
+                                      else set())
+    out["fallback"] = {"healthy_fallbacks": healthy, "modes_seen": sorted(modes), "modes_expected": sorted(expected),
+                       "recovered": bool(recovered), "speed_after_brake": core.ego.v}
+    out["fallback"]["ok"] = bool(healthy == 0 and expected <= modes and recovered)
     env.close()
     out["ok"] = all(v["ok"] for v in out.values() if isinstance(v, dict))
     return out

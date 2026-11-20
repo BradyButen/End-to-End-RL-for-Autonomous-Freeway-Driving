@@ -20,7 +20,10 @@ COLORS = {
     "wp_proj": (0.2, 1.0, 0.3, 1.0),     # projected waypoints
     "box": (1.0, 0.3, 1.0, 1.0),         # safe-set footprints
     "obj_pred": (1.0, 0.6, 0.2, 1.0),    # MPC object predictions (end of horizon)
-    "tube": (0.3, 0.5, 1.0, 1.0),        # MPC corridor boxes over the horizon
+    "tube": (0.3, 0.5, 1.0, 1.0),        # MPC corridor box at the current stage
+    "tube_future": (0.15, 0.25, 0.6, 1.0),  # corridor boxes further along the MPC horizon
+    "wp_unused": (0.55, 0.55, 0.55, 1.0),  # waypoint slots the RL output but switched off with its count k
+    "wp_link": (1.0, 0.45, 0.45, 1.0),   # ego -> waypoint 1 -> ... polyline (what the emergency gate checks)
 }
 
 
@@ -70,21 +73,25 @@ class OverlayDrawer:
             add_line(poly, COLORS["obj_pred"])
         for poly in frame.get("tube", []):
             add_line(np.vstack([poly, poly[:1]]), COLORS["tube"])
+        for poly in frame.get("tube_future", []):
+            add_line(np.vstack([poly, poly[:1]]), COLORS["tube_future"])
+        add_line(frame.get("wp_link", []), COLORS["wp_link"])
         if lines:
             self.lines.draw_lines(lines, colors)
         pts, pcols = [], []
-        for key in ("wp_raw_xy", "wp_proj_xy"):
+        for key, col in (("wp_unused_xy", "wp_unused"), ("wp_proj_xy", "wp_proj"), ("wp_raw_xy", "wp_raw")):
             arr = np.asarray(frame.get(key, []), float).reshape(-1, 2)
             for p in arr:
                 if np.all(np.isfinite(p)):
                     pts.append((float(p[0]), float(p[1]), Z + 0.3))
-                    pcols.append(COLORS["wp_raw" if key == "wp_raw_xy" else "wp_proj"])
+                    pcols.append(COLORS[col])
         if pts:
             self.points.draw_points(pts, pcols)
 
 
-def live_frame(core, decision_ctx: dict | None, diag: dict | None, mpc_horizon_s: float = 2.0) -> dict:
-    """Build an overlay frame from the running env/controllers."""
+def live_frame(core, decision_ctx: dict | None, diag: dict | None, mpc_horizon_s: float = 2.0,
+               tube_every: int = 10) -> dict:
+    """Build an overlay frame from the running env/controllers (live view and re-simulated replay)."""
     diag = diag or {}
     frame: dict = {}
     road = core.road
@@ -95,11 +102,21 @@ def live_frame(core, decision_ctx: dict | None, diag: dict | None, mpc_horizon_s
     if diag.get("pred_xy") is not None:
         frame["pred_xy"] = diag["pred_xy"]
     if diag.get("tube_corners") is not None:
-        frame["tube"] = list(diag["tube_corners"][:1])  # current stage only; future stages clutter the view
+        frame["tube"] = [np.asarray(diag["tube_corners"]).reshape(-1, 4, 2)[0]]   # current stage
+    tube = diag.get("tube_full")
+    if tube is not None and getattr(tube, "corners", None) is not None:
+        frame["tube_future"] = list(tube.corners[tube_every::tube_every])   # every 1 s along the 5 s horizon
     dec = (decision_ctx or {}).get("decision") or {}
     if "waypoints_raw" in dec:
         raw = np.asarray(dec["waypoints_raw"]).reshape(-1, 2)
         frame["wp_raw_xy"] = np.stack(road.to_world(raw[:, 0], raw[:, 1]), axis=1)
+        frame["wp_link"] = np.vstack([[core.ego.x, core.ego.y], frame["wp_raw_xy"]])
+        k = len(raw)
+        vec = np.asarray(dec.get("vector", []), float)
+        n_slots = (len(vec) - 2) // 2
+        if n_slots > k:
+            unused = vec[: 2 * n_slots].reshape(-1, 2)[k:]
+            frame["wp_unused_xy"] = np.stack(road.to_world(unused[:, 0], unused[:, 1]), axis=1)
         proj = np.asarray(dec["waypoints_projected"]).reshape(-1, 2)
         ok = np.all(np.isfinite(proj), axis=1)
         if ok.any():
@@ -122,10 +139,26 @@ def status_text(core, dec: dict, diag: dict) -> dict:
         "s / d": f"{e.s:6.1f} / {e.d:5.2f} m",
         "decision": core.episode_decisions,
     }
+    if "d_target" in dec:
+        txt["RL d* / v*"] = f"{dec['d_target']:5.2f} m / {dec['v_target'] * 3.6:5.1f} km/h"
     if "k" in dec and core.cfg["method"]["name"] == "m3":
-        txt["waypoints k"] = dec["k"]
+        txt["RL v* (max speed)"] = f"{dec['v_target'] * 3.6:5.1f} km/h"
+        raw = np.asarray(dec.get("waypoints_raw", []), float).reshape(-1, 2)
+        txt["RL waypoints k"] = dec["k"]
+        for j, (s, d) in enumerate(raw):
+            txt[f"  wp{j + 1} ahead / d"] = f"{s - e.s:5.1f} / {d:5.2f} m"
     if diag.get("solve_time"):
-        txt["solve time"] = f"{diag['solve_time'] * 1e3:5.1f} ms"
+        txt["solve time"] = f"{diag['solve_time'] * 1e3:5.1f} ms (cpu {diag.get('cpu_time', 0) * 1e3:5.1f})"
+    if diag.get("status"):
+        txt["MPC status"] = str(diag["status"])[:28]
+    if diag.get("tube_blocked") is not None:
+        txt["corridor faces from cars"] = diag["tube_blocked"]
+    if core.objects:
+        ahead = [o for o in core.objects if o.s > e.s and abs(o.d - e.d) < 2.0]
+        if ahead:
+            o = min(ahead, key=lambda o: o.s)
+            txt["lead car gap / dv"] = f"{o.s - e.s - (o.length + e.length) / 2:5.1f} m / " \
+                                       f"{(e.v - o.v) * 3.6:+5.1f} km/h"
     if diag.get("gated_brake"):
         txt["EMERGENCY BRAKE"] = "path to next waypoint blocked"
     if diag.get("fallback"):

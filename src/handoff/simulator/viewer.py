@@ -1,9 +1,8 @@
 """Live viewer and replay (spec §13) inside MetaDrive's own window — no separate video pipeline.
 
 * live:   run a policy (checkpoint or B0) with rendering on and overlays every control step.
-* replay: deterministic re-simulation of a logged episode from its seed + the frozen checkpoint; overlays
-          are redrawn from the logged decision/step arrays (MetaDrive's recorder does not store them), and the
-          re-simulated ego pose is checked against the log.
+* replay: deterministic re-simulation of a logged episode from its seed + the frozen checkpoint; overlays are
+          drawn from the re-simulated controllers (same as live), and the ego pose is checked against the log.
 """
 
 from __future__ import annotations
@@ -71,8 +70,11 @@ def replay(cfg: dict, episode_npz: str, checkpoint: str | None, topdown: bool = 
         if i < len(data["step_x"]):
             dev = float(np.hypot(core_.ego.x - data["step_x"][i], core_.ego.y - data["step_y"][i]))
             state["max_dev"] = max(state["max_dev"], dev)
-            frame = replay_frame(data, i, core_.road)
-            frame["text"]["deviation"] = f"{dev:.3f} m"
+            # the replay re-runs the policy and controllers, so draw everything they compute (waypoints, spline,
+            # MPC prediction, corridor, status); fall back to the logged arrays if no decision is available yet
+            frame = live_frame(core_, decision_ctx, diag) if decision_ctx else replay_frame(data, i, core_.road)
+            frame["text"] = {"replay step": f"{i} / {len(data['step_x'])}", "deviation from log": f"{dev:.3f} m",
+                             **frame.get("text", {})}
             if not topdown:
                 if drawer is None:
                     drawer = OverlayDrawer(core_.md.engine)

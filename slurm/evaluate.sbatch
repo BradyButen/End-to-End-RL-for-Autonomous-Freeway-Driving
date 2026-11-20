@@ -13,6 +13,7 @@
 #SBATCH --mem-per-cpu=4g
 #SBATCH --time=01:00:00
 #SBATCH --output=slurm-%x-%j.out
+#SBATCH --mail-type=END,FAIL             # email when the job ends or fails (to the submitting uniqname@umich.edu)
 
 set -euo pipefail
 METHOD="${METHOD:?set METHOD}"

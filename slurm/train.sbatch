@@ -17,6 +17,7 @@
 #SBATCH --mem-per-cpu=4g
 #SBATCH --time=04:00:00                 # estimate ~0.5–1 h per run at 2M control steps; 4 h margin
 #SBATCH --output=slurm-%x-%j.out
+#SBATCH --mail-type=END,FAIL             # email when the job ends or fails (to the submitting uniqname@umich.edu)
 
 set -euo pipefail
 METHOD="${METHOD:?set METHOD=m1|m2|m3}"

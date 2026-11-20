@@ -14,7 +14,7 @@ Checks:
   smoke        §17.6 each wrapper (m1/m2/m3) runs complete episodes with random actions; logs valid
   b0           §17.7 B0 completes evaluation episodes through the harness (all eval seeds)
   train_plumbing  SB3 PPO entry point runs end-to-end for a few hundred control steps (plumbing only)
-(§17.2 throughput: tests/benchmark_throughput.py; §17.5 safe-set: pytest tests/unit/test_controllers.py)
+(§17.2 throughput: tests/benchmark_throughput.py; §17.5 safe-set unit tests were removed in "RL V2", to be rebuilt)
 """
 
 import argparse
@@ -344,7 +344,8 @@ def check_b0() -> dict:
            if p.returncode else "", "summary": {k: summary.get(k) for k in ("n_episodes", "success", "collision",
                                                                            "off_road", "timeout", "mean_speed",
                                                                            "time_to_complete", "min_gap")}}
-    res["ok"] = bool(p.returncode == 0 and summary.get("n_episodes") == 20)
+    n_seeds = len(load_config("b0")["scenario"]["seeds"]["eval"])
+    res["ok"] = bool(p.returncode == 0 and summary.get("n_episodes") == n_seeds)
     return res
 
 

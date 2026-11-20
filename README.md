@@ -30,6 +30,8 @@ python scripts/evaluate.py --method m3 --checkpoint <run>/checkpoints/best.zip
 python scripts/evaluate.py --method b0
 python scripts/view.py live --method m3 --checkpoint <run>/checkpoints/best.zip     # needs a display
 python scripts/plot.py curves runs/m*/r3_fast/seed_*/* --metric success
+python scripts/compare.py runs/eval/b0 runs/m*/r3_fast/seed_*/* --out results/        # method comparison table
+python scripts/robustness.py --b0 --runs runs/m*/r3_fast/seed_*/*                      # robustness sweep (configs/robustness.yaml)
 
 python scripts/m3_harness.py edit --out configs/m3_harness/my_test.json   # M3 controller harness (hand-placed waypoints)
 scripts/run_all_m3.sh                                                      # run every harness scenario in turn

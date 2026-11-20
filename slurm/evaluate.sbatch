@@ -1,7 +1,7 @@
 #!/bin/bash
 # Final evaluation of a checkpoint (or B0) on the 20 fixed evaluation seeds. CPU only.
 #
-#   sbatch --export=ALL,METHOD=m3,CKPT=runs/m3/r0/seed_0/<ts>/checkpoints/best.zip slurm/evaluate.sbatch
+#   sbatch --export=ALL,METHOD=m3,CKPT=runs/m3/r3_fast/seed_0/<ts>/checkpoints/best.zip slurm/evaluate.sbatch
 #   sbatch --export=ALL,METHOD=b0,SCENARIO=freeway slurm/evaluate.sbatch
 #
 #SBATCH --job-name=handoff-eval

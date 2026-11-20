@@ -19,10 +19,18 @@ trajectory's speed (global target speed unless slowing for a blocking car).
 Constraints: tube A_k·p_k ≤ b_k (hard), |δ| ≤ δ_max, a ∈ accel_bounds, |Δδ| ≤ steer_rate·dt, 0 ≤ v ≤ v_cap,
 |v²·tan δ / (l_f+l_r)| ≤ a_lat_max.
 
-Failure handling (spec §7.3): if the solve fails and the tube was not just built, rebuild the tube from the
-current state and retry once; then → next input of the shifted previous plan (at most ``max_fallback_shift``
-steps); none left → emergency brake (throttle_brake = −1) with a lane-holding steering law. Every fallback is
-reported in the diagnostics with its reason.
+Speed ceiling: ``set_speed_limit(v)`` (M3: the RL's v* each decision) bounds every stage's speed by
+max(v, v0 − ceiling_brake·t_k), i.e. the ceiling ramps down from the current speed at ``ceiling_brake`` m/s²
+when the RL lowers it, so it never makes the problem infeasible on its own.
+
+Failure handling (spec §7.3). Solve time is measured in process CPU time (IPOPT runs in this process, so this is
+independent of other processes' load); a successful solve is always used, however long it took. If the solve
+fails and the tube was not just built, rebuild the tube and retry once; then:
+  * timeout / numerical failure → replay the shifted previous plan for up to ``timeout_fallback_shift`` steps,
+    then emergency brake (not terminal: ``diag["fallback_terminal"] = False``);
+  * infeasible → shifted previous plan for up to ``max_fallback_shift`` steps, then emergency brake with
+    ``diag["fallback_terminal"] = True`` (M3 may end the episode on it).
+Every fallback is reported in the diagnostics with its reason.
 """
 
 from __future__ import annotations
@@ -33,7 +41,7 @@ import casadi as ca
 import numpy as np
 
 from handoff.rl.methods.common import ActuationMap, Reference
-from handoff.rl.methods.m3_corridor import CorridorBuilder, Tube
+from handoff.rl.methods.m3_corridor import CorridorBuilder, RoadCorridor, Tube
 from handoff.simulator.road import RoadFrame, wrap_angle
 from handoff.simulator.state import EgoState, ObjectList
 
@@ -54,10 +62,14 @@ class MPCController:
         self.tau = float(cfg.get("steer_lag", 0.1))
         self.a_lat_max = float(cfg.get("max_lat_accel", 4.0))
         self.max_shift = int(cfg.get("max_fallback_shift", 5))
+        self.timeout_shift = int(cfg.get("timeout_fallback_shift", 5))
+        self.ceiling_brake = float(cfg.get("ceiling_brake", 4.0))
+        self.v_limit = v_cap
         self.NX = 5
         self.v_cap = v_cap
         self.v_target = v_target
-        self.corridor = CorridorBuilder(cfg["corridor"], ego_length, ego_width, self.dt, v_target, v_cap)
+        corridor_cls = {"road": RoadCorridor, "stock": CorridorBuilder}[cfg["corridor"].get("type", "road")]
+        self.corridor = corridor_cls(cfg["corridor"], ego_length, ego_width, self.dt, v_target, v_cap)
         self.rebuild_period = int(cfg["corridor"]["rebuild_period"])
         if self.corridor.K < self.N + self.rebuild_period:
             raise ValueError("corridor.horizon must cover the MPC horizon plus the rebuild period")
@@ -122,6 +134,7 @@ class MPCController:
                 lbg.append(-ca.inf)
                 ubg.append(0.0)
 
+        J += self._extra_cost(X, tube)
         wvec = ca.vertcat(ca.vec(X), ca.vec(U))
         nlp = {"x": wvec, "p": P, "f": J, "g": ca.vertcat(*g)}
         s = self.cfg["solver"]
@@ -154,6 +167,39 @@ class MPCController:
         ubx[nX + 1:nX + nU:2] = a_hi
         self.lbx, self.ubx = lbx, ubx
 
+    def _extra_cost(self, X, tube):
+        """Yaw-rate penalty + barrier on the corridor's two lateral faces (tuned in scripts/m3_harness.py).
+        X: (NX, N+1) states, tube: (12, N+1) half-spaces per stage as 4 x (a_x, a_y, b).
+
+        Yaw rate: w_yaw_rate * ((psi_k - psi_{k-1}) / dt)^2 over the horizon, damping heading oscillation
+        (weights.yaw_rate, default 20.0; 0 disables). On the straight freeway the reference yaw rate is ~0.
+
+        Barrier on rows 2 (left) and 3 (right) of each stage box, g = distance of the ego centre to the face
+        (b - a·p). Two zones, each 0 with zero slope at its start:
+            outer, g < δ  (0.5 m):   w       * (-ln(g/δ) + g/δ - 1)        gentle log
+            inner, g < δi (0.25 m):  w_inner * (δi/g - 1)^2                grows like 1/g^2
+        e.g. with the defaults (w 1, w_inner 10): g = 0.40 -> 0.02, 0.25 -> 0.19, 0.15 -> 4.9, 0.10 -> 23,
+        0.05 -> 161. g is floored at 1e-3 m so the terms stay finite if a solver iterate crosses the face.
+        From corridor: barrier_weight (1.0), barrier_dist (0.5), barrier_inner_weight (10.0),
+        barrier_inner_dist (0.25)."""
+        c = self.cfg["corridor"]
+        w = float(c.get("barrier_weight", 1.0))
+        dlt = float(c.get("barrier_dist", 0.5))
+        w_in = float(c.get("barrier_inner_weight", 10.0))
+        d_in = float(c.get("barrier_inner_dist", 0.25))
+        w_yr = float(self.cfg["weights"].get("yaw_rate", 20.0))
+        J = 0
+        for k in range(1, self.N + 1):
+            J += w_yr * ((X[2, k] - X[2, k - 1]) / self.dt) ** 2
+        for k in range(1, self.N + 1):
+            for j in (2, 3):
+                g = tube[3 * j + 2, k] - (tube[3 * j, k] * X[0, k] + tube[3 * j + 1, k] * X[1, k])
+                gc = ca.fmax(g, 1e-3)
+                r = gc / dlt
+                J += w * ca.if_else(r < 1, -ca.log(r) + r - 1, 0)
+                J += w_in * ca.if_else(gc < d_in, (d_in / gc - 1) ** 2, 0)
+        return J
+
     # ------------------------------------------------------------------ runtime
     def reset(self) -> None:
         self._prev_X = None
@@ -166,6 +212,7 @@ class MPCController:
         self.tube: Tube | None = None
         self._tube_age = 0
         self._tube_ref = None
+        self._eb_prev = None       # previous heading error of the emergency-brake law (None = first e-brake step)
 
     def set_road(self, road: RoadFrame) -> None:
         self.road = road
@@ -201,8 +248,24 @@ class MPCController:
         X[:, 0] = [ego.x, ego.y, ego.psi, ego.v, self.delta_act]
         return np.concatenate([X.T.ravel(), U.T.ravel()])
 
-    def _solve(self, x_init, p, lam=None):
-        kwargs = dict(x0=x_init, p=p, lbx=self.lbx, ubx=self.ubx, lbg=self.lbg, ubg=self.ubg)
+    def set_speed_limit(self, v: float | None) -> None:
+        """Speed ceiling for the MPC (m/s); None = v_cap."""
+        self.v_limit = self.v_cap if v is None else float(np.clip(v, 0.0, self.v_cap))
+
+    def _ubx(self, ego: EgoState) -> np.ndarray:
+        """Upper bounds with the speed ceiling ramped down from the current speed (always reachable)."""
+        ub = self.ubx.copy()
+        if self.v_limit < self.v_cap:
+            nX = self._idx[0]
+            k = np.arange(1, self.N + 1)
+            ramp = max(ego.v, 0.0) - self.ceiling_brake * self.dt * k
+            ub[3 + self.NX * k] = np.minimum(self.v_cap, np.maximum(self.v_limit, ramp))
+            assert 3 + self.NX * self.N < nX
+        return ub
+
+    def _solve(self, x_init, p, lam=None, ubx=None):
+        kwargs = dict(x0=x_init, p=p, lbx=self.lbx, ubx=self.ubx if ubx is None else ubx, lbg=self.lbg,
+                      ubg=self.ubg)
         if lam is not None:
             kwargs["lam_g0"], kwargs["lam_x0"] = lam
         try:
@@ -221,23 +284,26 @@ class MPCController:
             self._rebuild(ego, reference, objects)
             rebuilt = True
         t0 = time.perf_counter()
+        c0 = time.process_time()
+        ubx = self._ubx(ego)
         p, ref, idx = self._params(ego)
         x_init = self._initial_guess(ego, ref)
         lam = (self._prev_lam_g, self._prev_lam_x) if self._prev_lam_g is not None else None
-        sol, status, ok = self._solve(x_init, p, lam)
+        sol, status, ok = self._solve(x_init, p, lam, ubx)
         retried = False
         if not ok and not rebuilt:  # tube may be stale: rebuild from the current state and retry once
             self._rebuild(ego, reference, objects)
             rebuilt = retried = True
             p, ref, idx = self._params(ego)
-            sol, status, ok = self._solve(self._initial_guess(ego, ref), p)
+            sol, status, ok = self._solve(self._initial_guess(ego, ref), p, ubx=ubx)
         solve_time = time.perf_counter() - t0
-        timeout = solve_time > float(self.cfg["solver"]["max_cpu_time"]) * (3.0 if retried else 1.5) \
-            or "CpuTime" in status
+        cpu_time = time.process_time() - c0
+        timeout = (not ok) and ("CpuTime" in status or "Maximum_Iterations" in status)
         self._tube_age += 1
 
         r_here = reference.at_s(ego.s)
-        diag = {"solve_time": solve_time, "status": status, "fallback": False, "fallback_reason": "",
+        diag = {"solve_time": solve_time, "cpu_time": cpu_time, "status": status, "fallback": False,
+                "fallback_reason": "", "fallback_terminal": False, "v_limit": self.v_limit,
                 "tracking_error": float(abs(r_here["d"] - ego.d)), "ref_d": r_here["d"],
                 "ref_v": float(ref[3, 1]), "ref_psi": r_here["psi"], "n_objects": len(objects),
                 "tube_rebuilt": rebuilt, "tube_retry": retried,
@@ -246,7 +312,7 @@ class MPCController:
         if rebuilt:
             diag["tube_full"] = self.tube
 
-        if ok and not timeout:
+        if ok:
             wopt = np.asarray(sol["x"]).ravel()
             nX, nU = self._idx
             X = wopt[:nX].reshape(N + 1, self.NX).T
@@ -263,13 +329,15 @@ class MPCController:
             diag["fallback_reason"] = reason
             self._prev_lam_g = None
             self._prev_lam_x = None
-            if self._prev_U is not None and self._shift + 1 < min(N, self.max_shift + 1):
+            max_shift = self.max_shift if reason == "infeasible" else max(self.max_shift, self.timeout_shift)
+            if self._prev_U is not None and self._shift + 1 < min(N, max_shift + 1):
                 self._shift += 1
                 delta, acc = self._prev_U[:, self._shift]
                 diag["fallback_mode"] = "shifted_previous"
                 diag["pred_xy"] = self._prev_X[:2, self._shift:].T.copy()
             else:
                 diag["fallback_mode"] = "emergency_brake"
+                diag["fallback_terminal"] = reason == "infeasible"
                 self._prev_X = self._prev_U = None
                 u = self.emergency_brake(ego)
                 self.u_prev = np.array([u[0] * self.delta_max, self.actuation.command_to_accel(u[1])])
@@ -277,6 +345,7 @@ class MPCController:
                 diag["pred_xy"] = np.array([[ego.x, ego.y]])
                 return u, diag
 
+        self._eb_prev = None       # e-brake law's derivative restarts at the next e-brake
         self.u_prev = np.array([delta, acc])
         self._advance_lag(delta)
         steering = float(np.clip(delta / self.delta_max, -1.0, 1.0))
@@ -289,6 +358,31 @@ class MPCController:
         self.delta_act = a * self.delta_act + (1 - a) * float(np.clip(delta_cmd, -self.delta_max, self.delta_max))
 
     def emergency_brake(self, ego: EgoState) -> np.ndarray:
+        """Full brake, steering that puts heading first, damps it, and only gently pulls toward the nearest lane
+        centre (tuned in scripts/m3_harness.py):
+            u_s = k_h * e_psi + k_r * (e_psi - e_psi_prev) + k_l * (d_lane - d)
+        e_psi = road heading - ego heading (rad), per-step difference as damping. Gains (command units) from
+        ebrake_steer = [k_h, k_r, k_l], default [1.0, 0.3, 0.06] (heading/lateral = the tuned M2 PID P gains).
+        Used by the infeasibility fallback and by the blocked-path gate (``gated_brake``)."""
+        kh, kr, kl = (float(x) for x in self.cfg.get("ebrake_steer", [1.0, 0.3, 0.06]))
         lane_d = self.road.lane_centers[self.road.nearest_lane(ego.d)]
-        steer = 1.7 * float(wrap_angle(self.road.heading_at(ego.s) - ego.psi)) + 0.3 * (lane_d - ego.d)
-        return np.array([float(np.clip(steer, -1, 1)), -1.0])
+        e_psi = float(wrap_angle(self.road.heading_at(ego.s) - ego.psi))
+        de = 0.0 if self._eb_prev is None else e_psi - self._eb_prev
+        self._eb_prev = e_psi
+        steer = kh * e_psi + kr * de + kl * (lane_d - ego.d)
+        return np.array([float(np.clip(steer, -1.0, 1.0)), -1.0])
+
+    def gated_brake(self, ego: EgoState, reference: Reference) -> tuple[np.ndarray, dict]:
+        """Emergency brake instead of an MPC solve (the path to the next waypoint is blocked, see
+        ``m3_corridor.path_blocked``): the MPC is not solved, its warm start is cleared, and the e-brake law
+        drives. Keeps the lag estimate and u_prev consistent for when the MPC takes over again."""
+        u = self.emergency_brake(ego)
+        self.u_prev = np.array([u[0] * self.delta_max, self.actuation.command_to_accel(u[1])])
+        self._advance_lag(self.u_prev[0])
+        self._prev_X = self._prev_U = self._prev_lam_g = self._prev_lam_x = None
+        r_here = reference.at_s(ego.s)
+        diag = {"solve_time": 0.0, "status": "skipped:emergency_brake", "fallback": False, "fallback_reason": "",
+                "tube_rebuilt": False, "tube_retry": False, "tube_blocked": 0,
+                "tracking_error": float(abs(r_here["d"] - ego.d)), "ref_d": r_here["d"], "ref_v": float(ego.v),
+                "ref_psi": r_here["psi"], "gated_brake": True, "pred_xy": np.array([[ego.x, ego.y]])}
+        return u, diag

@@ -3,7 +3,7 @@
 
 experiment:
   method: m1               # set by method/<m>.yaml
-  reward_variant: r0       # set by reward/<r>.yaml
+  reward_variant: r3_fast  # set by reward/<r>.yaml (r3_fast is the only reward)
   scenario: freeway        # set by scenario/<s>.yaml
   seed: 0                  # training seed (PPO init + training-episode seed stream)
   runs_root: runs
@@ -12,7 +12,8 @@ sim:
   physics_world_step_size: 0.02
   decision_repeat: 5        # control step = 0.1 s
   control_dt: 0.1
-  horizon: 1200             # control steps before timeout (truncated); 120 s
+  horizon: 1500             # control steps before timeout (truncated); 150 s (longest route 1144 m = 103 s at the
+                            # 40 km/h traffic speed; 120 s left too little margin)
   on_continuous_line_done: true
   log_level: 50             # MetaDrive logging (50 = CRITICAL only)
   metadrive_overrides:
@@ -28,7 +29,11 @@ sim:
     lane_num: 3
     lane_width: 3.5
   ego:
-    # Stock MetaDrive default vehicle (its own fixed dynamics). Spawn: first block, random lane, fixed speed.
+    # Ego vehicle: MetaDrive "static_default" = the default car body with FIXED dynamics (engine 800, brake 150,
+    # friction 0.9, steering 40 deg). The stock "default" model resamples engine 750-850 / brake 80-180 every
+    # episode (pilot round 1 trained on that); the M2/M3 controllers were tuned on static_default.
+    # Spawn: first block, random lane, fixed speed.
+    vehicle_model: static_default
     spawn_speed_km_h: 40
     random_spawn_lane: true
     max_steering_deg: 40      # default vehicle's max steering (used to convert steering commands to radians)
@@ -70,31 +75,40 @@ actuation:
 logging:
   full_log_eval: true
   train_full_log_every: 50     # every Nth training episode per env gets full control/decision logs
+  tube_every: 10               # M3: store the corridor in full logs every Nth control step (it is rebuilt every step)
   max_logged_objects: 10
 
 eval:
-  n_episodes: 20
+  n_episodes: 40               # first N of scenario.seeds.eval (40 -> 2.5 % resolution on rates)
   n_workers: 1                 # parallel evaluation subprocesses (one MetaDrive each); raise on clusters
-  freq_control_steps: 25000    # evaluate every N control steps (summed over envs)
+  freq_control_steps: 200000   # evaluate every N control steps (summed over envs)
   deterministic: true
 
 training:
   total_control_steps: 2000000
+  max_wall_minutes: null       # optional wall-clock stop (training loop; the final eval still runs after it)
+  progress_seconds: 60         # print a one-line status (time, steps/s, episodes, recent return/success/crash)
   n_envs: 4
   checkpoint_freq_control_steps: 100000
   device: auto                 # "auto" = cuda if available else cpu; or "cpu" / "cuda" / "cuda:0"
   torch_threads: null          # CPU threads for PPO updates in the main process (null = torch default)
-  gamma_ref: 0.99              # per-0.1 s discount; gamma_method = gamma_ref ** (T_decision / 0.1)
+  gamma_ref: 0.99              # per-0.1 s discount; gamma_method = gamma_ref ** (T_decision / 0.1)  (~10 s lookahead)
+  gae_lambda_ref: 0.995        # per-0.1 s GAE lambda; lambda_method = gae_lambda_ref ** (T_decision / 0.1)
+                               # -> M1 0.995, M2 0.975, M3 0.951 (same ~7 s credit window for all); replaces ppo.gae_lambda
+  normalize_reward: true       # SB3 VecNormalize on rewards only (running return std); logs/eval stay raw
+  reward_clip: 100.0           # clip of the normalised reward (10 would clip the -500 crash penalty early in training)
+  watchdog_minutes: 30         # kill the job (exit 3) if no PPO step / eval completes for this long (hung worker);
+                               # must exceed one evaluation round. 0 disables. A crashed worker exits immediately.
 
 ppo:                           # SB3 PPO kwargs (defaults unless overridden in method/*.yaml)
   learning_rate: 0.0003
-  n_steps: 2048
+  n_steps: 2048                # overridden per method (configs/method/*.yaml): 128 s of driving per env per rollout
   batch_size: 64
   n_epochs: 10
-  gae_lambda: 0.95
   clip_range: 0.2
-  ent_coef: 0.0
+  ent_coef: 0.0                # no entropy bonus: exploration is set by log_std_init; a bonus would fight it
   vf_coef: 0.5
   max_grad_norm: 0.5
   policy_kwargs:
     normalize_images: false
+    log_std_init: -0.7         # initial action std 0.5 (SB3 default 0 -> std 1: ~32 % of samples clipped to ±1)

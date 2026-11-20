@@ -1,7 +1,7 @@
 #!/bin/bash
 # One training run: (method, reward variant, scenario, seed). Submit from the repo root:
 #
-#   sbatch --export=ALL,METHOD=m3,REWARD=r0,SCENARIO=freeway,SEED=0 slurm/train.sbatch
+#   sbatch --export=ALL,METHOD=m3,REWARD=r3_fast,SCENARIO=freeway,SEED=0 slurm/train.sbatch
 #   sbatch --export=ALL,METHOD=m1,EXTRA="--set training.total_control_steps=500000" slurm/train.sbatch
 #
 # GPU node by default (PPO updates on the GPU; simulation + MPC on the CPU cores). For a CPU-only run, change
@@ -20,7 +20,7 @@
 
 set -euo pipefail
 METHOD="${METHOD:?set METHOD=m1|m2|m3}"
-REWARD="${REWARD:-r0}"
+REWARD="${REWARD:-r3_fast}"
 SCENARIO="${SCENARIO:-freeway}"
 SEED="${SEED:-0}"
 EXTRA="${EXTRA:-}"
@@ -30,6 +30,8 @@ cd "$REPO_DIR"
 module load "${PY_MODULE:-python/3.12.1}"
 source "${VENV:-$REPO_DIR/.venv}/bin/activate"
 
+export PYTHONUNBUFFERED=1                # live stdout in the slurm log
+export PYTHONFAULTHANDLER=1               # Python traceback on a native crash (segfault) in any process
 export SDL_VIDEODRIVER=dummy              # headless pygame (BEV observation)
 export OMP_NUM_THREADS=1                  # env subprocesses: 1 thread each (PPO threads set below)
 export MKL_NUM_THREADS=1

@@ -53,6 +53,7 @@ def make_metadrive_config(cfg: dict, render: bool = False, agent_policy=None) ->
         need_inverse_traffic=False,
         random_spawn_lane_index=bool(sim["ego"].get("random_spawn_lane", True)),
         vehicle_config=dict(
+            vehicle_model=sim["ego"].get("vehicle_model", "static_default"),   # fixed dynamics (no resampling)
             spawn_velocity=[sim["ego"]["spawn_speed_km_h"] / 3.6, 0.0],
             spawn_velocity_car_frame=True,
             lidar=dict(num_lasers=0, distance=50),  # IDM finds neighbours through the lidar's range query only

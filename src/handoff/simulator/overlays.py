@@ -126,6 +126,8 @@ def status_text(core, dec: dict, diag: dict) -> dict:
         txt["waypoints k"] = dec["k"]
     if diag.get("solve_time"):
         txt["solve time"] = f"{diag['solve_time'] * 1e3:5.1f} ms"
+    if diag.get("gated_brake"):
+        txt["EMERGENCY BRAKE"] = "path to next waypoint blocked"
     if diag.get("fallback"):
         txt["FALLBACK"] = f"{diag.get('fallback_reason', '')} ({diag.get('fallback_mode', '')})"
     for n, v in active.items():

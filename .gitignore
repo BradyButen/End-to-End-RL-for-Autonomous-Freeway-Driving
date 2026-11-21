@@ -46,3 +46,5 @@ slurm-*.out
 
 # Figures go in a snapshot's plots/ folder, not the repo root
 /*.png
+
+Nav565-Team16-ProjectProposal.pdf

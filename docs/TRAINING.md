@@ -8,23 +8,31 @@ PPO (Stable-Baselines3, `MultiInputPolicy`: NatureCNN on the BEV + MLP on the eg
 critic), identical for M1/M2/M3. Budgets and cadences are counted in **control steps** (0.1 s of simulated driving),
 summed over parallel envs, so every method gets the same simulated experience (D-07).
 
-## 2. Reward: `r3_fast` (the only reward)
-Per control step, summed within a decision; terminal terms added on the last step.
+## 2. Reward: `r4_straight` (the only reward)
+Per control step, summed within a decision; terminal terms added on the last step. Raw terms: `src/handoff/reward.py`;
+weights and the full arithmetic: `configs/r4_straight.yaml`. Tuned 2026-11-21 by driving the env by hand
+(`scripts/drive.py`) and on M3 scenarios (`scripts/validate.py run`), watching the return live.
 
 | term | weight | why |
 |---|---|---|
-| progress (Δs, m) | +0.1 /m | dense signal: tells an untrained policy which way is good (~+100 for a full route) |
-| time | −0.1 /step (−1 /s) | arriving sooner is directly better; net per step 0.01·v − 0.1 > 0 only above 10 m/s |
-| success | +50 | finishing beats every non-finish |
-| collision | −500 | also charged for an M3 `emergency_brake` episode end |
-| off_road | −500 | |
-| lane_change | −2 per lane | stops weaving; a pass (out and back, −4) pays when it saves > 4 s |
+| progress (Δs, m) | +0.2 /m | dense signal: tells an untrained policy which way is good (~+200 for a full route, whatever the speed) |
+| time | −0.1 /step (−1 /s) | arriving sooner is directly better |
+| success | +50 | finishing beats every non-finish at a reasonable speed |
+| collision | −2000 | also charged for an M3 failed run (`emergency_brake`, `infeasible_plan`) |
+| off_road | −2000 | |
+| speed_gap | −2.0 × ((v − 80 km/h)/80 km/h)² per step | pushes toward the cap, quadratically: −5/s at 40 km/h, −1.25/s at 60, −0.31/s at 70 |
+| heading | −2.7 per rad of heading error beyond 0.5°, per step | damps oscillation (weaving ±0.5 m for 100 s ≈ −110); summed over a lane change ≈ lateral distance / speed (−4.0 to −7.9) |
+| lane_keep | −0.2 per step outside ±0.57 m of a lane centre (body ~25 cm inside the lines) | no riding the lines (−2/s); 0 inside the lane rather than an in-lane bonus, which would cancel the time cost |
+| proximity | −5 × (G − gap)/G per step for a car overlapping sideways; G = 5 m to a car ahead, 2 m to a car behind | steep near-miss shaping before the crash (−30/s at 2 m behind a car, −50/s at contact); cars beside the ego never count |
+| lane_change | 0 (logged only) | the `lane_changes` metric; passes are paid for by heading + lane_keep (≈ −5.5 to −11 per lane change) |
 
-Expected episode scores: fast finish at 22 m/s ≈ +105 > finish behind 35–45 km/h traffic ≈ +55 to +65 > timeout ≈ −20 to −50
-> crash ≈ −400 to −500. A crash never pays: the whole 150 s time cost is −150 ≪ −500. Re-scoring the pilot's logged
-eval episodes confirmed the ordering (crashes −495, timeouts −78, slow finishes +40 to +48).
-r0 (MetaDrive's default, used in the pilot) and the untuned example variants were removed: under r0 a finished run
-earned ~+1040 and a crash only −5, so crashing late was almost as good as finishing.
+Expected episode scores: fast finish at 80 km/h ≈ +205 > finish at 70 km/h ≈ +183 > finish behind 40 km/h traffic
+≈ −290 > crawl to the timeout at 20 km/h ≈ −1670 > crash / failed run ≈ −1845 (late) to −2000 (early) > standing
+still for 150 s ≈ −3150. Known: standing still scores below a crash, and crawling is close to one, so a stuck policy
+loses little by crashing or by asking for undrivable waypoints (M3); "a crash is always worst" needs speed_gap
+< ~0.55 at collision −2000. Full arithmetic: `configs/r4_straight.yaml`.
+History: r0 (MetaDrive's default, pilot round 1: a finish earned ~+1040 and a crash only −5) and r3_fast (round 2:
+progress 0.1, time, terminals ±50 / −500, lane_change −2) were removed; their weights are in each run's config.yaml.
 
 ## 3. PPO settings and why
 Base (`configs/base.yaml`) unless a method overrides it (`configs/m1.yaml`, `m2.yaml`, `m3.yaml`).
@@ -45,7 +53,8 @@ Base (`configs/base.yaml`) unless a method overrides it (`configs/m1.yaml`, `m2.
 ## 4. Run robustness
 * A crashed env or eval worker (e.g. a native segfault) ends the job: `FAILED.txt` (traceback),
   `checkpoints/crash.zip`, all child processes killed, non-zero exit.
-* Watchdog: no PPO step or eval for 30 min (`training.watchdog_minutes`) → kill workers, exit code 3 (hung worker).
+* Watchdog: no progress for 15 min (`training.watchdog_minutes`; env start-up, PPO steps, each finished eval
+  episode and the final shutdown all count) → kill workers, exit code 3 (hung worker). Env shutdown waits at most 2 min.
 * `train.sbatch` sets `PYTHONUNBUFFERED=1` (live log) and `PYTHONFAULTHANDLER=1` (traceback on a segfault).
 * `checkpoints/vecnormalize_*.pkl` is saved with every checkpoint (needed only to resume; resume is not implemented).
 
@@ -71,10 +80,14 @@ What it showed (and what changed because of it):
 * No episode crashed in its first 3 s (spawns are clean).
 
 ## 6. Known risks for round 2
-* **Emergency brake = crash is M3-only** — M3's crash rate counts predicted crashes; report `emergency_brake`
-  next to `collision`.
-* **M3 decides once per second**: a car cutting in mid-decision is the corridor/MPC's problem; an infeasible
-  problem ends the episode.
+* **M3 failed runs count as crashes** — `emergency_brake` (gate, or MPC still failing after its replay) and
+  `infeasible_plan` (waypoints needing more than 4 m/s² lateral acceleration) end the episode with the collision
+  penalty; report both next to `collision`. Early M3 training will end many episodes at the first decision with
+  `infeasible_plan` (random waypoints); it should fall within a few hundred thousand steps.
+* **M3 decides once per second**: a car cutting in mid-decision is the corridor/MPC's problem. The corridor ignores
+  cars more than 2 m behind the ego (`corridor.rear_range`); keeping clear of faster traffic from behind is the RL's.
+* **Spurious off-road**: MetaDrive's lane raycast can miss at road-piece seams (an `off_road` end near a lane
+  centre).
 * **No time-left feature** in the observation (value estimates slightly off near the 150 s cap).
 * **20 → 40 eval seeds** doubles eval cost; M3 eval is the slowest.
 
@@ -95,21 +108,38 @@ python scripts/train.py --method m3 --set training.n_envs=14 --set eval.n_worker
 ```
 Budget for a 4–5 h run ≈ control steps/s × 4.5 h × 3600 × 0.8 (eval + PPO updates).
 
-Launch (seed 0; `r3_fast` is the default reward):
+Sizing from round 2 (14 training envs + 4 eval workers, 20 cores, 4 GB/core, 40 eval episodes every 200k steps;
+control steps/s including eval): M1 ~175 on `gpu`, M2 ~195 and M3 ~93 on `standard`. All three methods get the
+same budget (equal simulated experience, D-07); only the wall time differs. Round 2 lost all three runs: M1 and M3
+hit the time limit, M2 was OOM-killed at 80 GB after 3.9 h (memory grows over the run, most likely MetaDrive per
+episode reset; M2 had the most episodes). The progress line now prints `mem <GB>` (main + all workers): extrapolate
+its growth in the first hour, and check `sacct -j <id> --format=MaxRSS` afterwards.
+
+| budget (control steps) | M1 (`gpu`) | M2 (`standard`) | M3 (`standard`) |
+|---|---|---|---|
+| 2M | ~3.2 h → `--time=05:00:00` | ~2.9 h → `05:00:00` | ~6.0 h → `09:00:00` |
+| 3M (M2 was still improving at 2.7M) | ~4.8 h → `07:00:00` | ~4.3 h → `07:00:00` | ~9.0 h → `12:00:00` |
+
+M1 on `gpu`: its rollouts are 18k samples × 4 epochs through the CNN, which would eat much of its time on 2 CPU
+threads; M2 / M3 updates are small (3.6k / 1.8k samples), so `standard` is fine. Memory: ask for 7 GB/core
+(140 GB for 20 cores) until the `mem` line shows the real growth rate (check the node's total with
+`scontrol show node <node>`).
+
+Launch (seed 0; `r4_straight` is the default reward):
 ```bash
-EV='--set training.total_control_steps'
-sbatch --partition=standard --gres=none --time=05:30:00 --export="ALL,METHOD=m3,SEED=0,EXTRA=$EV=<M3 budget>" slurm/train.sbatch
-sbatch --partition=gpu       --time=05:30:00 --export="ALL,METHOD=m1,SEED=0,EXTRA=$EV=<M1 budget>" slurm/train.sbatch
-sbatch --partition=standard --gres=none --time=05:30:00 --export="ALL,METHOD=m2,SEED=0,EXTRA=$EV=<M2 budget>" slurm/train.sbatch
+EV='--set training.total_control_steps=3000000'
+sbatch --partition=gpu --time=07:00:00 --mem-per-cpu=7g --export="ALL,METHOD=m1,SEED=0,EXTRA=$EV" slurm/train.sbatch
+sbatch --partition=standard --gres=none --time=07:00:00 --mem-per-cpu=7g --export="ALL,METHOD=m2,SEED=0,EXTRA=$EV" slurm/train.sbatch
+sbatch --partition=standard --gres=none --time=12:00:00 --mem-per-cpu=7g --export="ALL,METHOD=m3,SEED=0,EXTRA=$EV" slurm/train.sbatch
 sbatch --array=0-8%3 slurm/train_array.sbatch     # later: 3 methods x 3 seeds
 ```
 `train.sbatch`: 20 cores → 14 training envs + 4 eval workers + main; `OMP_NUM_THREADS=1`. Each run writes
-`runs/<method>/r3_fast/seed_<n>/<timestamp>/`. Check `sacct -j <id> --format=MaxRSS` and lower `--mem-per-cpu`
+`runs/<method>/r4_straight/seed_<n>/<timestamp>/`. Check `sacct -j <id> --format=MaxRSS` and lower `--mem-per-cpu`
 if far below 80 GB.
 
 Analysis:
 ```bash
-python scripts/plot.py curves runs/m*/r3_fast/seed_*/* --metric success --x control_steps --out curves.png
+python scripts/plot.py curves runs/m*/r4_straight/seed_*/* --metric success --x control_steps --out curves.png
 python scripts/evaluate.py --checkpoint <run>/checkpoints/best.zip --n-workers 4
 python scripts/view.py live --checkpoint <run>/checkpoints/best.zip --seeds 1017   # needs a display
 python scripts/view.py replay --episode <run>/episodes/<id>.npz --checkpoint <run>/checkpoints/best.zip

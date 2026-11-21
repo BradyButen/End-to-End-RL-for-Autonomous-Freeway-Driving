@@ -4,6 +4,8 @@ pipeline below turns them into controls.
     action [-1, 1]^12 = [ds_1, d_1, ..., ds_5, d_5, v*, count]
       decode   k = 1..5 waypoints (s, d): ds in [5, 40] m per slot (cumulative from the ego), d in
                [right edge - 1 m, left edge + 1 m]; v* in [20, 80] km/h                          (per decision)
+      check    the waypoints must be drivable: each spline segment's peak lateral acceleration
+               (5.77 |dd| v^2 / ds^2) within the MPC's max_lat_accel, else the plan is infeasible  (per decision)
       spline   piecewise quintic in s through the waypoints, flat 80 m beyond the last, speed v* (per decision)
       gate     a car in the planned path (the line ego -> next waypoint crosses its keep-out zone) that the ego
                closes on faster than it can stop for (dv^2 / 2 gap > gate_decel) -> emergency brake, no MPC solve
@@ -11,8 +13,11 @@ pipeline below turns them into controls.
                lateral faces at the exterior lane centres (+- inset), cut by the cars' keep-out zones
       MPC      mpc.py: tracks the trajectory inside the corridor (hard constraints); v* is also its speed ceiling
 
-Episode end (ebrake.ends_episode): the gate, or an emergency brake after an INFEASIBLE MPC, ends the episode as
-"emergency_brake" with the collision penalty (the controller gave up: a predicted crash). Timeouts never do.
+Failed runs (ebrake.ends_episode), all with the collision penalty: the RL is charged for plans the controller
+cannot carry out, instead of the car stopping dead on the freeway.
+  * infeasible waypoints -> the episode ends at once as "infeasible_plan";
+  * the gate fires, or the MPC still fails after replaying its last plan (mpc.replay_steps) -> "emergency_brake".
+With ends_episode false (scripts/validate.py run) none of these end the run: the car brakes and you see it.
 """
 
 from __future__ import annotations
@@ -67,8 +72,9 @@ class Corridor:
     """Road-aligned corridor, rebuilt every control step.
 
     Stage points follow the spline at a speed ramp to v* (+accel / -brake m/s^2), ignoring cars: stopping for a car
-    is the MPC's job, through the keep-out faces. Every face is fixed in the world, so boxes do not slide with the
-    stage points:
+    is the MPC's job, through the keep-out faces. Cars ahead and alongside count; a car behind counts only while its
+    front bumper is within ``rear_range`` (2 m) of the ego's rear bumper. Every face is fixed in the world, so boxes
+    do not slide with the stage points:
       * lateral faces: the exterior lane centres pulled in by ``inset`` (-0.3 = 0.3 m wider: d in [-7.3, +0.3]);
       * keep-out zone of a car: its footprint + keepout_s fore / aft + margin_d sideways, predicted at constant
         velocity, grown by the ego half-size (the box constrains the ego CENTRE, so the body stays out of the zone);
@@ -83,6 +89,7 @@ class Corridor:
 
     def __init__(self, cfg: dict, n_stages: int, dt: float, ego_length: float, ego_width: float, v_cap: float):
         self.inset = float(cfg["inset"])
+        self.rear_range = float(cfg["rear_range"])
         self.keepout_s, self.margin_d = float(cfg["keepout_s"]), float(cfg["margin_d"])
         self.accel, self.brake = float(cfg["accel"]), float(cfg["brake"])
         self.K, self.dt = int(n_stages), float(dt)
@@ -112,11 +119,19 @@ class Corridor:
         traj = self.trajectory(ego, ref)
         t = np.arange(K + 1) * self.dt
         zones = []      # per car: predicted centre (s(t), d(t)), constraint half-sizes, heading vs the road
+        ego_rear = ego.s - 0.5 * ego.length
         for o in objects:
+            if o.s + 0.5 * o.length < ego_rear - self.rear_range:   # behind the ego beyond rear_range: ignored
+                continue
             sdot, ddot = frenet_velocity(o, road)
             zl, zw = self.keepout_half(o)
             zones.append((o.s + sdot * t, o.d + ddot * t, zl + 0.5 * self.L, zw + 0.5 * self.W,
                           float(wrap_angle(o.psi - road.heading_at(o.s)))))
+        # Where each car is relative to the ego NOW (zone rear / front vs the ego's current s): decides which face
+        # it gets at every stage. Classifying with the predicted zone instead turned a slower car the ego had just
+        # passed into "ahead" for the late stages (its predicted rear passes the ego's current s), putting a front
+        # face far behind the stage points: an infeasible corridor on every merge back in front of a slower car.
+        now = [(so[0] - hl, so[0] + hl) for so, _, hl, _, _ in zones]
         d_lo0 = min(road.lane_centers) + self.inset
         d_hi0 = max(road.lane_centers) - self.inset
         A, b = np.zeros((K + 1, 4, 2)), np.zeros((K + 1, 4))
@@ -125,18 +140,18 @@ class Corridor:
         for k in range(K + 1):
             sk, dk = traj[k, 0], traj[k, 1]
             front, back, lo, hi = self.BIG, -self.BIG, d_lo0, d_hi0
-            for so, do, hl, hw, rel in zones:
+            for (so, do, hl, hw, rel), (rear_now, front_now) in zip(zones, now):
                 cr, sr = np.cos(rel), np.sin(rel)   # the zone's road-frame bounding box at stage k
                 ss = [so[k] + cr * su * hl - sr * sw * hw for su, sw in corner_signs]
                 dd = [do[k] + sr * su * hl + cr * sw * hw for su, sw in corner_signs]
                 sa, sb, da, db = min(ss), max(ss), min(dd), max(dd)
                 seg = (ref.s >= sa) & (ref.s <= sb)
                 if np.any((ref.d[seg] > da) & (ref.d[seg] < db)):    # in path
-                    if sa >= ego.s:            # ahead of the ego now: stay behind its rear face
+                    if rear_now >= ego.s:      # ahead of the ego now: stay behind its (predicted) rear face
                         front = min(front, sa - sk)
-                    elif sb <= ego.s:          # behind the ego now: stay ahead of its front face
+                    elif front_now <= ego.s:   # behind the ego now: stay ahead of its (predicted) front face
                         back = max(back, sb - sk)
-                    elif ego.d >= do[k]:       # alongside now: stay on the ego's side
+                    elif ego.d >= do[0]:       # alongside now: stay on the ego's side
                         lo = max(lo, db)
                     else:
                         hi = min(hi, da)
@@ -193,6 +208,23 @@ def path_blocked(ego: EgoState, waypoints: np.ndarray, objects: ObjectList, road
     return None
 
 
+# ======================================================================================= feasibility
+def plan_lat_accel(ego: EgoState, waypoints: np.ndarray, v_star: float, brake: float) -> float:
+    """Peak lateral acceleration (m/s^2) the spline through ``waypoints`` asks for. A quintic segment moving dd
+    over ds (zero slope / curvature at both ends) peaks at 5.77 |dd| / ds^2 in d''(s), times v^2. The speed for a
+    segment is what the car can be doing at its start: braking at ``brake`` from its current speed, but not below
+    min(current speed, v*) (generous: the slower of the two is assumed reachable). The first segment's initial
+    slope is ignored."""
+    v0 = max(ego.v, 0.0)
+    floor = min(v0, v_star)
+    pts = np.vstack([[ego.s, ego.d], np.asarray(waypoints, float).reshape(-1, 2)])
+    peak = 0.0
+    for (s0, d0), (s1, d1) in zip(pts[:-1], pts[1:]):
+        v = np.sqrt(max(v0**2 - 2.0 * brake * (s0 - ego.s), floor**2))
+        peak = max(peak, 5.77 * abs(d1 - d0) * v**2 / max(s1 - s0, 1e-6) ** 2)
+    return float(peak)
+
+
 # ======================================================================================= method
 def waypoint_count(c: float, n_slots: int) -> int:
     """Count channel c in [-1, 1] -> k = clip(1 + floor((c + 1) / 2 * n), 1, n)."""
@@ -217,7 +249,9 @@ class M3(Method):
         self.mpc = MPC(m["mpc"], ActuationMap(cfg["actuation"]["table"]), lf=ego["front_wheelbase"],
                        lr=ego["rear_wheelbase"], max_steering_rad=env.max_steering_rad, v_cap=env.v_cap)
         self.corridor = Corridor(m["corridor"], self.mpc.N, self.mpc.dt, ego["length"], ego["width"], env.v_cap)
+        self.lat_accel_limit = float(m["mpc"]["max_lat_accel"])
         self.waypoints = np.zeros((0, 2))   # the k waypoints in use (s, d)
+        self.lat_accel = 0.0                # peak lateral acceleration the current plan asks for
         self.tube: Tube | None = None       # this step's corridor (None while the gate brakes)
 
     def _d_range(self) -> tuple[float, float]:
@@ -247,20 +281,30 @@ class M3(Method):
         super().reset()
         self.mpc.reset(self.env.road)
         self.waypoints = np.zeros((0, 2))
+        self.lat_accel = 0.0
         self.tube = None
 
     def decide(self, action):
         slots, k, v_star = self.decode(action)
         self.waypoints = slots[:k]
+        self.lat_accel = plan_lat_accel(self.env.ego, self.waypoints, v_star, self.corridor.brake)
         self.mpc.set_speed_limit(v_star)
         self.reference = spline_reference(self.env.ego, self.env.road, self.waypoints, v_star,
                                           ds=self.spline_cfg["ds"], extend=self.spline_cfg["extend"])
         return {"vector": np.concatenate([slots.ravel(), [v_star, k]]), "k": k, "v_target": v_star,
-                "waypoints": self.waypoints, "slots": slots}
+                "waypoints": self.waypoints, "slots": slots, "lat_accel": self.lat_accel,
+                "feasible": self.lat_accel <= self.lat_accel_limit}
 
     def control(self):
         env = self.env
         ego, objects, road = env.ego, env.objects, env.road
+        infeasible = self.lat_accel > self.lat_accel_limit
+        if infeasible and self.ebrake_ends:     # the RL asked for the undrivable: end the run now (failed run)
+            self.tube = None
+            r = self.reference.at_s(ego.s)
+            return self.mpc.brake(ego), {"status": f"infeasible_plan:{self.lat_accel:.1f}m/s2", "ref_v": ego.v,
+                                         "infeasible_terminal": True, "tracking_error": abs(r["d"] - ego.d),
+                                         "ref_d": r["d"], "ref_psi": r["psi"]}
         blocker = None
         if self.gate:
             blocker = path_blocked(ego, self.waypoints, objects, road, self.corridor.keepout_s, self.corridor.margin_d,
@@ -275,7 +319,8 @@ class M3(Method):
             u, diag = self.mpc.step(ego, self.tube)
             diag["tube"] = self.tube
         r = self.reference.at_s(ego.s)
-        diag.update(tracking_error=abs(r["d"] - ego.d), ref_d=r["d"], ref_psi=r["psi"], blocker=blocker)
+        diag.update(tracking_error=abs(r["d"] - ego.d), ref_d=r["d"], ref_psi=r["psi"], blocker=blocker,
+                    plan_infeasible=infeasible)
         if self.ebrake_ends and (blocker is not None or diag.get("fallback_terminal")):
             diag["ebrake_terminal"] = True     # the env ends the episode after this step (collision penalty)
         return u, diag

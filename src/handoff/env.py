@@ -12,7 +12,7 @@ One RL step = one decision:
 Same observation and reward for every method:
   * obs = {"bev": 5x84x84 top-down (road, past positions, 3 traffic frames; +-50 m),
            "ego": [v / v_max, d (road-centred, / half width), heading error, steering, throttle_brake]}
-  * reward = reward.py (r3_fast), summed undiscounted over the decision's control steps.
+  * reward = reward.py (configs/r4_straight.yaml by default), summed undiscounted over the decision's control steps.
 
 A method is a small class (m1.py, m2.py, m3.py) with ``period``, ``action_space``, ``reset()``, ``decide(action)``
 and ``control()``; it reads the world from the env (``env.ego``, ``env.objects``, ``env.road``).
@@ -107,13 +107,14 @@ class DrivingEnv(gym.Env):
         cls = method_class(cfg["method"]["name"])
         self.md = make_metadrive_env(cfg, render=render, agent_policy=cls.agent_policy())
         self.traffic = TrafficSpeeds(cfg["scenario"]["traffic"])
-        self.reward = Reward(cfg["reward"])
+        self.reward = Reward(cfg["reward"], self.v_max)
         log = cfg["logging"]
         self.full_log_eval = bool(log["full_log_eval"])
         self.full_every = int(log["train_full_log_every"])
         self.tube_every = max(1, int(log["tube_every"]))
         self.recorder = EpisodeRecorder((Path(run_dir) / "episodes") if run_dir else None,
-                                        int(log["max_logged_objects"]), self.dt, self.max_steering_rad)
+                                        int(log["max_logged_objects"]), self.dt, self.max_steering_rad,
+                                        weights=self.reward.weights)
         seeds = cfg["scenario"]["seeds"]
         self.train_seeds = (int(seeds["train_low"]), int(seeds["train_high"]))
         self._seed_rng = np.random.default_rng([int(cfg["experiment"]["seed"]), rank, int(is_eval)])
@@ -225,11 +226,14 @@ class DrivingEnv(gym.Env):
         if diag.get("ebrake_terminal"):          # M3: emergency brake ends the run, scored as a collision
             info["emergency_brake"] = True
             terminated = True
+        if diag.get("infeasible_terminal"):      # M3: undrivable waypoints end the run, scored as a collision
+            info["infeasible_plan"] = True
+            terminated = True
         self.episode_control_steps += 1
         self.total_control_steps += 1
         self.ego = extract_ego(self.md, self.road, self.episode_control_steps * self.dt)
         self.objects = self._extract_objects()
-        total, raw, weighted = self.reward.step(prev, self.ego, info)
+        total, raw, weighted = self.reward.step(prev, self.ego, info, self.objects)
         self._log_step(u, diag, total, raw, weighted)
         info["reward_terms"] = raw
         if self.on_step is not None:

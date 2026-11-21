@@ -1,0 +1,14 @@
+{
+  "map_seed": 0,
+  "ego_lane": 1,
+  "ego_speed_kmh": 60.0,
+  "target_speed_kmh": 70.0,
+  "overrides": [],
+  "waypoints": [
+    [
+      23.15,
+      -3.173
+    ]
+  ],
+  "cars": []
+}

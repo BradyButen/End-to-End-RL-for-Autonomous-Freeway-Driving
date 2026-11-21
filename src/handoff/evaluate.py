@@ -80,7 +80,9 @@ def _worker(conn, cfg: dict, run_dir: str | None, worker_id: int):
                 if state_dict is not None:
                     policy.load_state_dict(state_dict)
                     fn = sb3_policy_fn(policy, deterministic)
-                conn.send(("result", run_episodes(env, fn, seeds, tag=tag)))
+                for seed in seeds:        # one message per episode, so the trainer's watchdog sees progress
+                    conn.send(("episode", (seed, run_episodes(env, fn, [seed], tag=tag)[0])))
+                conn.send(("done", None))
     except Exception:  # noqa: BLE001
         conn.send(("error", traceback.format_exc()))
     finally:
@@ -117,14 +119,26 @@ class ParallelEvaluator:
             raise RuntimeError(f"unexpected worker message {msg}")
         return payload
 
-    def evaluate(self, state_dict, seeds: list[int], deterministic: bool = True, tag: str | None = None) -> list[dict]:
-        """``state_dict`` None = no policy (B0)."""
-        chunks = [list(seeds[i::len(self.conns)]) for i in range(len(self.conns))]
-        for c, chunk in zip(self.conns, chunks):
-            c.send(("eval", (state_dict, chunk, deterministic, tag)))
-        results = {}
-        for c, chunk in zip(self.conns, chunks):
-            results.update(zip(chunk, self._expect(c, "result")))
+    def evaluate(self, state_dict, seeds: list[int], deterministic: bool = True, tag: str | None = None,
+                 heartbeat=None) -> list[dict]:
+        """``state_dict`` None = no policy (B0). ``heartbeat()`` is called after every finished episode. A worker
+        that dies raises here (EOFError); one that errors raises RuntimeError with its traceback."""
+        from multiprocessing.connection import wait
+
+        for i, c in enumerate(self.conns):
+            c.send(("eval", (state_dict, list(seeds[i::len(self.conns)]), deterministic, tag)))
+        results, pending = {}, set(self.conns)
+        while pending:
+            for c in wait(list(pending)):
+                msg, payload = c.recv()
+                if msg == "error":
+                    raise RuntimeError(f"evaluation worker failed:\n{payload}")
+                if msg == "episode":
+                    results[payload[0]] = payload[1]
+                    if heartbeat is not None:
+                        heartbeat()
+                elif msg == "done":
+                    pending.discard(c)
         return [results[s] for s in seeds]
 
     def close(self):

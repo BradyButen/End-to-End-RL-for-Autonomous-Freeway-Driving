@@ -1,7 +1,7 @@
 #!/bin/bash
 # One training run: (method, reward variant, scenario, seed). Submit from the repo root:
 #
-#   sbatch --export=ALL,METHOD=m3,REWARD=r3_fast,SCENARIO=freeway,SEED=0 slurm/train.sbatch
+#   sbatch --export=ALL,METHOD=m3,REWARD=r4_straight,SCENARIO=freeway,SEED=0 slurm/train.sbatch
 #   sbatch --export=ALL,METHOD=m1,EXTRA="--set training.total_control_steps=500000" slurm/train.sbatch
 #
 # GPU node by default (PPO updates on the GPU; simulation + MPC on the CPU cores). For a CPU-only run, change
@@ -15,13 +15,14 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=20              # training envs + eval workers + main process
 #SBATCH --mem-per-cpu=4g
-#SBATCH --time=04:00:00                 # estimate ~0.5–1 h per run at 2M control steps; 4 h margin
+#SBATCH --time=04:00:00                 # override per method: round 2 ran ~175 (M1, gpu), ~195 (M2), ~93 (M3)
+                                        # control steps/s incl. eval; see docs/TRAINING.md §7
 #SBATCH --output=slurm-%x-%j.out
 #SBATCH --mail-type=END,FAIL             # email when the job ends or fails (to the submitting uniqname@umich.edu)
 
 set -euo pipefail
 METHOD="${METHOD:?set METHOD=m1|m2|m3}"
-REWARD="${REWARD:-r3_fast}"
+REWARD="${REWARD:-r4_straight}"
 SCENARIO="${SCENARIO:-freeway}"
 SEED="${SEED:-0}"
 EXTRA="${EXTRA:-}"

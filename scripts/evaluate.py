@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """Final evaluation of a trained checkpoint, or of B0, on the fixed evaluation seeds.
 
-    python scripts/evaluate.py --checkpoint runs/m3/r3_fast/seed_0/<ts>/checkpoints/best.zip --n-workers 4
-    python scripts/evaluate.py --checkpoint runs/m3/r3_fast/seed_0/<ts>        # run folder: final.zip, else best.zip
+    python scripts/evaluate.py --checkpoint runs/m3/r4_straight/seed_0/<ts>/checkpoints/best.zip --n-workers 4
+    python scripts/evaluate.py --checkpoint runs/m3/r4_straight/seed_0/<ts>  # run folder: final.zip, else best.zip
     python scripts/evaluate.py --method b0 --out runs/eval/b0
 
 With a checkpoint, the config is the run's own config.yaml (--set overrides still apply), so the evaluated env
@@ -56,7 +56,8 @@ def main():
     CsvAppender(out / "episodes.csv").write(summaries)
     agg = aggregate(summaries)
     (out / "summary.json").write_text(json.dumps(agg, indent=2))
-    for k in ("success", "collision", "emergency_brake", "off_road", "timeout", "mean_speed", "time_to_complete",
+    for k in ("success", "collision", "emergency_brake", "infeasible_plan", "off_road", "timeout", "mean_speed",
+              "time_to_complete",
               "min_gap", "min_ttc", "rms_long_jerk", "solve_time_mean", "solve_time_p95", "fallback_count", "return"):
         if k in agg:
             print(f"{k:>20s}: {agg[k]:.4g}")

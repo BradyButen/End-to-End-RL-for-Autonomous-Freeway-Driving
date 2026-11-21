@@ -74,6 +74,8 @@ def overlay(env, diag: dict) -> tuple[list, list, dict]:
         gated = bool(diag.get("gated_brake"))
         text["RL v* (max speed)"] = f"{dec['v_target'] * 3.6:5.1f} km/h"
         text["RL waypoints k"] = f"{dec['k']} of {method.n_slots}"
+        text["plan lateral accel"] = (f"{dec['lat_accel']:4.1f} m/s2" + ("" if dec["feasible"] else
+                                      f"  INFEASIBLE (> {method.lat_accel_limit:g})"))
         for j, (s, d) in enumerate(dec["waypoints"]):
             text[f"  wp{j + 1} ahead / d"] = f"{s - ego.s:5.1f} / {d:5.2f} m"
         text["MPC"] = f"{str(diag.get('status', ''))[:22]}  {1000 * float(diag.get('solve_time', 0) or 0):4.0f} ms"
@@ -119,8 +121,10 @@ def overlay(env, diag: dict) -> tuple[list, list, dict]:
 class Viewer:
     """Draws the overlays into MetaDrive's 3D window after every control step (set as ``env.on_step``)."""
 
-    def __init__(self, fps: float = 10.0, extra_points=(), allow_constraint_toggle: bool = False):
+    def __init__(self, fps: float = 10.0, extra_points=(), allow_constraint_toggle: bool = False,
+                 show_return: bool = False):
         self.fps = fps                        # 10 = real time, 0 = as fast as it renders
+        self.show_return = show_return        # text panel: return so far + each reward term's running total
         self.extra_points = list(extra_points)  # world (x, y) drawn white (validation: every placed waypoint)
         self.extra_text: dict = {}
         self.allow_toggle = allow_constraint_toggle
@@ -159,7 +163,8 @@ class Viewer:
             lines.insert(0, (np.array(self.trail), TRAIL))
             points += [(p, WHITE) for p in self.extra_points]
             self._draw(lines, points)
-            env.md.render(text={**self.extra_text, **text, "keys": "M overlays, X end episode"
+            env.md.render(text={**self._return_text(env), **self.extra_text, **text,
+                                "keys": "M overlays, X end episode"
                                 + (", K constraints" if self.allow_toggle else "")})
         else:
             env.md.render()
@@ -168,6 +173,13 @@ class Viewer:
             if wait > 0:
                 time.sleep(wait)
         self._t_last = time.time()
+
+    def _return_text(self, env) -> dict:
+        if not self.show_return:
+            return {}
+        sums = env.recorder.weighted_sums
+        return {"RETURN so far": f"{sum(sums.values()):+8.1f}",
+                **{f"  {n}": f"{v:+8.1f}" for n, v in sums.items() if env.reward.weights[n] != 0}}
 
     def _draw(self, lines, points) -> None:
         ls, cs = [], []
@@ -322,7 +334,7 @@ def episode_report(summary_or_npz, out_dir: str | Path, road=None, placed=None, 
     bad = (data["step_gated_brake"] > 0) | (data["step_fallback"] > 0)
 
     plt = _plt()
-    n_rows = 4 if method in ("m1", "b0") else 6
+    n_rows = 4 if method in ("m1", "b0", "manual") else 6
     fig, ax = plt.subplots(n_rows, 1, figsize=(14, 3 + 2.3 * n_rows),
                            gridspec_kw={"height_ratios": [2.4] + [1] * (n_rows - 1)})
     a = ax[0]                                                    # road map in (s, d)
@@ -405,6 +417,94 @@ def episode_report(summary_or_npz, out_dir: str | Path, road=None, placed=None, 
     return path
 
 
+def reward_weights(reward_name: str) -> dict:
+    """Weights of configs/<reward_name>.yaml."""
+    from handoff.config import CONFIG_DIR, load_yaml
+
+    return {k: float(v) for k, v in load_yaml(CONFIG_DIR / f"{reward_name}.yaml")["reward"]["weights"].items()}
+
+
+def reward_report(npz, out_dir: str | Path | None = None, weights: dict | None = None,
+                  label: str | None = None) -> tuple[Path, dict]:
+    """How the return built up over an episode: <id>_reward.png (cumulative return and each term's share, the
+    reward rate, speed and lane) -> (path, {term: total}).
+
+    ``weights`` re-scores the episode with another reward (e.g. ``reward_weights("r4")``): the reward is linear in
+    the logged raw terms, so this is exact for any weights over the same terms. Default: the weights it ran with."""
+    from handoff.logs import load_episode
+    from handoff.reward import TERMINAL
+
+    ep = load_episode(npz)
+    data, meta = ep["data"], ep["meta"]
+    names = [str(n) for n in data["term_names"]]
+    if weights is None:
+        logged = data.get("term_weights")
+        if logged is not None:
+            weights = dict(zip(names, logged))
+        else:   # older logs: weight = (weighted return of the term) / (its raw sum), from the episode summary
+            weights = {n: float(meta[f"return_{n}"]) / float(meta[f"raw_{n}"]) if float(meta[f"raw_{n}"]) else 0.0
+                       for n in names}
+        rescored = False
+    else:
+        missing = [n for n, w in weights.items() if w != 0 and n not in names]
+        if missing:
+            raise ValueError(f"terms {missing} were not logged in {npz}; drive again with the new reward")
+        rescored = True
+    t = data["step_t"]
+    dt = float(t[1] - t[0]) if len(t) > 1 else 0.1
+    contrib = {n: float(weights.get(n, 0.0)) * data[f"term_{n}"] for n in names}
+    active = [n for n in names if np.any(contrib[n] != 0)]
+    total = sum(contrib.values())
+    totals = {n: float(np.sum(contrib[n])) for n in names}
+    totals["return"] = float(np.sum(total))
+
+    plt = _plt()
+    fig, ax = plt.subplots(3, 1, figsize=(13, 10), sharex=True, gridspec_kw={"height_ratios": [2.2, 1.2, 1]})
+    a = ax[0]
+    a.plot(t, np.cumsum(total), "k", lw=2.2, label=f"return  {totals['return']:+.1f}")
+    for n in active:
+        a.plot(t, np.cumsum(contrib[n]), lw=1.3, label=f"{n}  {totals[n]:+.1f}")
+    a.axhline(0, color="0.5", lw=0.8)
+    a.set_ylabel("cumulative reward")
+    a.legend(loc="best", fontsize=9)
+    a.grid(alpha=0.3)
+    a = ax[1]                       # reward per second (1 s trailing window), terminal terms shown separately
+    shaping = sum(contrib[n] for n in names if n not in TERMINAL)
+    n_win = max(int(round(1.0 / dt)), 1)
+    a.plot(t, np.convolve(shaping, np.ones(n_win))[: len(t)] / (n_win * dt), color="tab:blue",
+           label="reward per second (non-terminal terms, 1 s window)")
+    for n in TERMINAL:
+        if n in contrib:
+            for i in np.flatnonzero(contrib[n]):
+                a.annotate(f"{n} {contrib[n][i]:+.0f}", (t[i], 0), xytext=(-60, 15), textcoords="offset points",
+                           color="tab:red", fontsize=9, arrowprops=dict(arrowstyle="->", color="tab:red"))
+    a.axhline(0, color="0.5", lw=0.8)
+    a.set_ylabel("reward / s")
+    a.legend(loc="best", fontsize=9)
+    a.grid(alpha=0.3)
+    a = ax[2]
+    a.plot(t, data["step_v"] * 3.6, "k", label="speed (km/h)")
+    a.set_ylabel("km/h")
+    a.grid(alpha=0.3)
+    a2 = a.twinx()
+    a2.step(t, data["step_lane_index"], where="post", color="tab:green", lw=1, label="lane (0 = left)")
+    a2.set_ylabel("lane")
+    a2.invert_yaxis()
+    a.legend(loc="upper left", fontsize=9)
+    a2.legend(loc="upper right", fontsize=9)
+    ax[-1].set_xlabel("t (s)")
+    what = label or meta.get("method", "")
+    ax[0].set_title(f"{what} seed {meta.get('seed')}: {meta.get('termination')}, {t[-1]:.1f} s, "
+                    f"return {totals['return']:+.1f}" + ("  (re-scored)" if rescored else ""))
+    fig.tight_layout()
+    out_dir = Path(out_dir) if out_dir else Path(npz).parent
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"{Path(npz).stem}_reward{'_rescored' if rescored else ''}.png"
+    fig.savefig(path, dpi=110)
+    plt.close(fig)
+    return path, totals
+
+
 def learning_curves(run_dirs, metric: str = "success", x: str = "control_steps", out: str | Path = "curves.png"):
     """Mean +- std over seeds of an eval metric vs training progress, one line per (method, reward)."""
     import pandas as pd
@@ -441,7 +541,8 @@ def comparison_table(csv_files, metrics=None):
     """Mean +- std of final-evaluation metrics per (method, reward)."""
     import pandas as pd
 
-    metrics = metrics or ["success", "collision", "emergency_brake", "off_road", "timeout", "time_to_complete",
+    metrics = metrics or ["success", "collision", "emergency_brake", "infeasible_plan", "off_road", "timeout",
+                          "time_to_complete",
                           "mean_speed", "min_gap", "min_ttc", "rms_long_jerk", "rms_lat_accel", "rms_steer_rate",
                           "tracking_error_rms", "solve_time_mean", "fallback_count", "lane_changes"]
     df = pd.concat([pd.read_csv(f) for f in csv_files], ignore_index=True)

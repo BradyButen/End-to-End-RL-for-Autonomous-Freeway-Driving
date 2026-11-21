@@ -64,12 +64,18 @@ k = 1–5 waypoints. Pipeline (also driven by `scripts/validate.py` with hand-pl
    that the ego closes on faster than it can stop for (Δv² / 2·gap > 6 m/s²) → full brake with a heading-first
    steering law instead of the MPC. Following a car at its speed never fires it.
 5. **Failures** — solve time counted in process CPU time; successful solves always used. Timeout / numerical
-   failure → replay the previous plan up to 5 steps (`mpc.replay_steps.timeout`), then emergency brake (never ends
-   the episode). Infeasible → emergency brake immediately (`mpc.replay_steps.infeasible: 0`).
+   failure → replay the previous plan up to 5 steps (`mpc.replay_steps.timeout`); infeasible → no replay
+   (`mpc.replay_steps.infeasible: 0`); then emergency brake.
 
-**Episode end on emergency brake** (`method.ebrake.ends_episode`): the gate, or an emergency brake after an
-infeasible MPC, ends the episode as `emergency_brake` with the collision penalty — the controller has given up,
-so it is scored as a crash. Only M3 has this; report it next to collisions (it is a *predicted* crash).
+**Failed runs** (`method.ebrake.ends_episode`, 2026-11-21): the RL is charged for plans the controller cannot carry
+out, instead of the car stopping dead on the freeway. All end the episode with the collision penalty:
+* `infeasible_plan` — checked once per decision: a waypoint segment of the spline needs more peak lateral
+  acceleration (5.77·|Δd|·v²/Δs², at the speed reachable by that segment braking at 4 m/s², floored at
+  min(v, v\*)) than the MPC's `max_lat_accel` (4 m/s²). Ends on the decision's first control step.
+* `emergency_brake` — the gate fires, or the MPC still fails after the replay.
+
+Only M3 has these; report them next to collisions (predicted crashes / undrivable plans). In
+`scripts/validate.py run` (ends_episode false) none of them end the run: the car brakes and you see it.
 
 ## 5. Logging (`logs.py`, `evaluate.py`)
 Every episode → one row in `episodes.csv` (termination, return and per-term returns, speed, jerk, gaps, solver

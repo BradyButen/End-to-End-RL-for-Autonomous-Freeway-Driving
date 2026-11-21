@@ -17,9 +17,10 @@ Speed ceiling: the RL's v* (``set_speed_limit``), ramped down from the current s
 never makes the problem infeasible by itself.
 
 Failures (solve time is process CPU time; a successful solve is always used, however long it took):
-  * timeout / numerical failure -> replay the previous plan for up to replay_steps.timeout steps, then brake;
-  * infeasible                   -> replay up to replay_steps.infeasible steps (0 = brake at once), then brake with
-                                    diag["fallback_terminal"] = True (M3 may end the episode on it).
+  * timeout / numerical failure -> replay the previous plan for up to replay_steps.timeout steps;
+  * infeasible                   -> replay up to replay_steps.infeasible steps (0 = none);
+  then emergency brake with diag["fallback_terminal"] = True: M3 ends the episode on it as a failed run
+  (ebrake.ends_episode) rather than leaving the car stopped on the freeway.
 Emergency brake (``brake``): full brake, steering that holds the road heading and gently pulls to the nearest lane
 centre. Used by the fallback above and by M3's gate.
 """
@@ -196,7 +197,7 @@ class MPC:
             diag["pred_xy"] = self._prev_X[:2, self._shift:].T.copy()
             return self._apply(delta, acc), diag
         diag["fallback_mode"] = "emergency_brake"
-        diag["fallback_terminal"] = reason == "infeasible"
+        diag["fallback_terminal"] = True
         diag["pred_xy"] = np.array([[ego.x, ego.y]])
         return self.brake(ego), diag
 

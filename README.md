@@ -30,7 +30,9 @@ python scripts/evaluate.py --checkpoint <run>/checkpoints/best.zip --n-workers 4
 python scripts/evaluate.py --method b0
 python scripts/view.py live --checkpoint <run> --seeds 1003 1027              # needs a display
 python scripts/view.py replay --episode <run>/episodes/<id>.npz --checkpoint <run>/checkpoints/best.zip
-python scripts/plot.py curves runs/m*/r3_fast/seed_*/* --metric success
+python scripts/plot.py curves runs/m*/r4_straight/seed_*/* --metric success
+python scripts/drive.py --seeds 1000 1003                                   # drive it yourself; reward plot after
+python scripts/plot.py reward runs/drive/<ts>/episodes/<id>.npz --reward r4 # re-score a drive / episode
 
 python scripts/validate.py run configs/validation/overtake.json             # M3 on hand-placed waypoints + cars
 python scripts/validate.py edit --out configs/validation/my_test.json       # place waypoints / cars, then Run
@@ -40,13 +42,13 @@ Any config value can be overridden with `--set key.sub=value`.
 
 ## Layout
 ```
-configs/          base.yaml  freeway.yaml (scenario)  m1/m2/m3/b0.yaml (methods)  r3_fast.yaml (reward)
+configs/          base.yaml  freeway.yaml (scenario)  m1/m2/m3/b0.yaml (methods)  r4_straight.yaml (reward)
                   validation/*.json (M3 scenarios: waypoints + cars)
 src/handoff/
   config.py       load + merge the YAML configs, shared CLI arguments
   sim.py          MetaDrive setup, Frenet road frame, ego / car state, traffic speeds, actuation table
   env.py          DrivingEnv: the one Gym env (decision loop, observation, reward, logging) + Method base class
-  reward.py       r3_fast reward terms
+  reward.py       reward terms (weights in configs/r4_straight.yaml)
   m1.py           M1 end-to-end, B0 IDM baseline
   m2.py           M2: (d*, v*) -> quintic reference -> cascaded PID
   m3.py           M3: waypoints -> spline -> road corridor -> e-brake gate -> MPC
@@ -56,7 +58,7 @@ src/handoff/
   evaluate.py     evaluation on fixed seeds (parallel workers)
   logs.py         run folders, per-episode recorder (.npz), episode metrics
   viz.py          MetaDrive viewer + overlays, episode overview plots, learning curves
-scripts/          train, evaluate, view, plot, validate, calibrate_actuation, matlab/ (M2 PID tuner)
+scripts/          train, evaluate, view, drive, plot, validate, calibrate_actuation, matlab/ (M2 PID tuner)
 slurm/            Great Lakes setup + job scripts
 runs/             outputs (git-ignored)
 ```

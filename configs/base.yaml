@@ -1,9 +1,9 @@
 # Base configuration. Merge order (src/handoff/config.py):
-#   base.yaml -> <scenario>.yaml (freeway) -> <method>.yaml (m1 m2 m3 b0) -> <reward>.yaml (r3_fast) -> --set key.sub=value
+#   base.yaml -> <scenario>.yaml (freeway) -> <method>.yaml (m1 m2 m3 b0) -> <reward>.yaml (r4_straight) -> --set key.sub=value
 
 experiment:
   method: m1               # set by <method>.yaml
-  reward_variant: r3_fast  # set by <reward>.yaml (r3_fast is the only reward)
+  reward_variant: r4_straight  # set by <reward>.yaml
   scenario: freeway        # set by <scenario>.yaml
   seed: 0                  # training seed (PPO init + training-episode seed stream)
   runs_root: runs
@@ -97,8 +97,10 @@ training:
                                # -> M1 0.995, M2 0.975, M3 0.951 (same ~7 s credit window for all); replaces ppo.gae_lambda
   normalize_reward: true       # SB3 VecNormalize on rewards only (running return std); logs/eval stay raw
   reward_clip: 100.0           # clip of the normalised reward (10 would clip the -500 crash penalty early in training)
-  watchdog_minutes: 30         # kill the job (exit 3) if no PPO step / eval completes for this long (hung worker);
-                               # must exceed one evaluation round. 0 disables. A crashed worker exits immediately.
+  watchdog_minutes: 15         # kill the job (exit 3) if nothing progresses for this long (hung worker): env start-up,
+                               # PPO steps, each eval episode and shutdown count. Must exceed one M3 eval episode
+                               # (<= 150 s simulated, a few min wall) and one PPO update. 0 disables.
+                               # A crashed worker (exception / segfault) ends the job immediately instead.
 
 ppo:                           # SB3 PPO kwargs (defaults unless overridden in method/*.yaml)
   learning_rate: 0.0003

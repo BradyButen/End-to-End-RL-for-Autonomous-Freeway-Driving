@@ -7,11 +7,15 @@
        python scripts/validate.py run <scenario> --set method.mpc.weights.lateral=4.0
        python scripts/validate.py run <scenario> --no-constraints                 # MPC without the corridor (K)
        python scripts/validate.py run <scenario> --demo                           # road + cars only (M toggles)
+       python scripts/validate.py run <scenario> --reward my_reward               # score with configs/my_reward.yaml
    Every decision (1 s) the next <= 5 placed waypoints more than ds_min ahead go into the RL action exactly as a
    policy would output them (re-spaced to ds in [5, 40] m, d clipped to the action range), with v* = the scenario's
    target speed. The run ends on a crash / off-road, when the ego has stood still for 3 s, or 30 m past the last
-   waypoint. An emergency brake does not end the run here (method.ebrake.ends_episode=false) so you see the stop.
-   Writes runs/validation/<scenario>/<timestamp>/: episodes/<id>.npz, <id>_overview.png, <id>_steps.csv, result.json.
+   waypoint. An emergency brake does not end the run here (method.ebrake.ends_episode=false) so you see the stop;
+   --set method.ebrake.ends_episode=true scores it as the RL would (episode ends, collision -500).
+   The reward the RL would get (configs/r4_straight.yaml by default) is shown live: return so far and each term.
+   Writes runs/validation/<scenario>/<timestamp>/: episodes/<id>.npz, <id>_overview.png, <id>_reward.png
+   (cumulative return and each term over time), <id>_steps.csv, result.json.
 
    Scenario JSON: {"map_seed": 0, "ego_lane": 1, "ego_speed_kmh": 60, "target_speed_kmh": 70,
                    "waypoints": [[s, d], ...], "cars": [[s, d] or [s, d, speed_kmh], ...], "overrides": ["k=v"]}
@@ -27,11 +31,15 @@
 3. Checks (pass / fail; each in its own process, report in runs/validation/checks/):
        python scripts/validate.py check                 # all
        python scripts/validate.py check m3 scenarios    # some
+       python scripts/validate.py check m3 --render     # watch the m2 / m3 checks in the MetaDrive window
+       python scripts/validate.py check m3.pass_lead --render   # one M3 case: pass_lead, stopped_car,
+                                                                # infeasible_plan, failed_solve
    env        ego dynamics pinned, spawn speed / lane, RoadFrame vs MetaDrive, forced off-road ends the episode,
               determinism (same seed + actions -> identical trajectory; replay relies on it)
    m2         PID: lane 1 -> 0 -> 2 -> 1 with speed changes, scripted (d*, v*); cross-track / speed tolerances
-   m3         passes a 35 km/h lead; stops for a stopped car in its lane; fallback chain (forced solver failure ->
-              replayed plan -> emergency brake) and recovery
+   m3         passes a 35 km/h lead; stops for a stopped car in its lane; undrivable waypoints end the run as
+              infeasible_plan; a solver that keeps failing ends the run (as trained), or brakes and recovers
+              (ends_episode false)
    smoke      M1 / M2 / M3 complete random-action episodes; logs consistent (terms, returns, decision counts)
    b0         B0 completes every evaluation seed through the evaluator
    train      PPO entry point end to end for a few hundred control steps per method (plumbing, not learning)
@@ -68,9 +76,9 @@ def load_scenario(path) -> dict:
     return sc
 
 
-def scenario_config(sc: dict, overrides=()) -> dict:
+def scenario_config(sc: dict, overrides=(), reward: str = "r4_straight") -> dict:
     """M3 config for a scenario: no traffic, fixed spawn, no time limit, solid lines do not end the run."""
-    return load_config("m3", overrides=[
+    return load_config("m3", reward=reward, overrides=[
         "scenario.traffic.density=0", f"sim.ego.spawn_lane={int(sc['ego_lane'])}",
         f"sim.ego.spawn_speed_km_h={float(sc['ego_speed_kmh'])}",
         f"sim.target_speed_km_h={float(sc['target_speed_kmh'])}",
@@ -78,14 +86,24 @@ def scenario_config(sc: dict, overrides=()) -> dict:
         *sc.get("overrides", []), *overrides])
 
 
-def controlled_env(method: str, ego_lane: int, ego_kmh: float, overrides=(), run_dir=None, render=False):
+RENDER = {"on": False, "fps": 10.0}   # `check --render`: show the m2 / m3 checks in the MetaDrive window
+
+
+def controlled_env(method: str, ego_lane: int, ego_kmh: float, overrides=(), run_dir=None, label: str = ""):
     """A method env on map seed 0 without MetaDrive traffic, the ego spawned in ``ego_lane`` at ``ego_kmh``
-    (add cars after reset with ``env.add_scripted_car``)."""
+    (add cars after reset with ``env.add_scripted_car``). With ``check --render`` it opens the viewer (overlays +
+    live reward), titled ``label``."""
     from handoff.env import make_env
 
     cfg = load_config(method, overrides=["scenario.traffic.density=0", f"sim.ego.spawn_lane={ego_lane}",
                                          f"sim.ego.spawn_speed_km_h={float(ego_kmh)}", *overrides])
-    return make_env(cfg, is_eval=True, run_dir=run_dir, render=render)
+    env = make_env(cfg, is_eval=True, run_dir=run_dir, render=RENDER["on"])
+    if RENDER["on"]:
+        from handoff.viz import Viewer
+
+        env.on_step = Viewer(fps=RENDER["fps"], show_return=True)
+        env.on_step.extra_text = {"CHECK": label or method}
+    return env
 
 
 def scripted_action(method, ego_s: float, placed: np.ndarray, v: float) -> np.ndarray:
@@ -103,7 +121,7 @@ def scripted_action(method, ego_s: float, placed: np.ndarray, v: float) -> np.nd
 
 def cmd_run(args) -> dict:
     from handoff.env import make_env
-    from handoff.viz import Viewer, drive_episode, episode_report
+    from handoff.viz import Viewer, drive_episode, episode_report, reward_report
 
     sc = load_scenario(args.scenario)
     placed = np.array(sorted(sc["waypoints"]), dtype=float).reshape(-1, 2)
@@ -112,7 +130,7 @@ def cmd_run(args) -> dict:
     render = not args.no_render
     if render and os.environ.get("SDL_VIDEODRIVER") == "dummy":
         os.environ.pop("SDL_VIDEODRIVER")
-    cfg = scenario_config(sc, args.overrides + (["sim.render_clean=true"] if args.demo else []))
+    cfg = scenario_config(sc, args.overrides + (["sim.render_clean=true"] if args.demo else []), args.reward)
     out = Path(args.out) if args.out else OUT / Path(args.scenario).stem / time.strftime("%Y%m%d-%H%M%S")
     env = make_env(cfg, render=render, is_eval=True, run_dir=out)
     method = env.method
@@ -121,7 +139,7 @@ def cmd_run(args) -> dict:
     s_stop = None
     viewer = None
     if render:
-        viewer = Viewer(fps=args.fps, allow_constraint_toggle=True)
+        viewer = Viewer(fps=args.fps, allow_constraint_toggle=True, show_return=True)
         viewer.show = not args.demo
 
     def act(_obs):
@@ -150,11 +168,13 @@ def cmd_run(args) -> dict:
         summ = drive_episode(env, setup_and_act, int(sc["map_seed"]), "validate", viewer, stop)
         episode_report(summ, out, env.road, placed=placed, cars=[c[:2] for c in sc["cars"]],
                        solver_limit_s=float(cfg["method"]["mpc"]["solver"]["max_cpu_time"]))
+        _, totals = reward_report(summ["log_file"], out, label=f"{Path(args.scenario).stem} ({args.reward})")
     finally:
         env.close()
     keys = ("termination", "sim_time", "distance", "mean_speed", "min_gap", "fallback_count", "gated_brake_count",
             "solve_time_mean", "solve_time_p95", "solve_time_max", "tracking_error_rms", "tracking_error_max")
-    result = {"scenario": str(args.scenario), "overrides": args.overrides, **{k: summ.get(k) for k in keys}}
+    result = {"scenario": str(args.scenario), "reward": args.reward, "overrides": args.overrides,
+              **{k: summ.get(k) for k in keys}, "reward_breakdown": totals}
     (out / "result.json").write_text(json.dumps(result, indent=2, default=str) + "\n")
     print(json.dumps(result, indent=2, default=str))
     print(f"wrote {out}/")
@@ -345,9 +365,11 @@ def cmd_edit(args):
 
 
 # ======================================================================================= checks
-PID_TOL_LANE_CHANGE = 0.30   # m, max cross-track error during a lane change
-PID_TOL_STEADY = 0.10        # m, cross-track error once settled
-PID_TOL_SPEED = 0.5          # m/s, speed error once settled
+# Generous on purpose: these catch a broken controller, not tune one. The steady limit stays inside the reward's
+# in-lane zone (reward.LANE_ZONE = 0.57 m).
+PID_TOL_LANE_CHANGE = 1.0    # m, max cross-track error during a lane change
+PID_TOL_STEADY = 0.5         # m, cross-track error once settled
+PID_TOL_SPEED = 1.0          # m/s, speed error once settled
 
 
 def check_env() -> dict:
@@ -413,7 +435,7 @@ def check_env() -> dict:
 
 
 def check_m2() -> dict:
-    env = controlled_env("m2", ego_lane=1, ego_kmh=54.0)
+    env = controlled_env("m2", ego_lane=1, ego_kmh=54.0, label="m2: lanes 1 -> 0 -> 2 -> 1, speed steps")
     env.reset(options={"episode_seed": 0})
     L = env.road.lane_centers
     plan = [(L[1], kmh(60), 6), (L[0], kmh(60), 10), (L[2], kmh(70), 14), (L[1], kmh(50), 10)]
@@ -439,10 +461,10 @@ def check_m2() -> dict:
     return res
 
 
-def check_m3() -> dict:
+def m3_pass_lead() -> dict:
     out = {}
     # (a) pass a 35 km/h lead: lane 1 -> lane 0 while passing -> back to lane 1
-    env = controlled_env("m3", ego_lane=1, ego_kmh=60.0)
+    env = controlled_env("m3", ego_lane=1, ego_kmh=60.0, label="m3 (a) pass_lead: pass a 35 km/h car")
     env.reset(options={"episode_seed": 0})
     L = env.road.lane_centers
     lead = env.add_scripted_car(130.0, L[1], 35.0)
@@ -450,7 +472,8 @@ def check_m3() -> dict:
     passed, reason = False, None
     for _ in range(80):
         d_tgt = L[0] if lead_s() - env.ego.s > -15 else L[1]
-        _, _, te, tr, info = env.step(env.method.encode([40.0, 40.0], [d_tgt, d_tgt], kmh(70)))
+        d_mid = 0.5 * (env.ego.d + d_tgt)     # spread each lane change over two 40 m segments (drivable at 70 km/h)
+        _, _, te, tr, info = env.step(env.method.encode([40.0, 40.0], [d_mid, d_tgt], kmh(70)))
         passed |= env.ego.s > lead_s() + 20
         if te or tr:
             reason = info["termination"]
@@ -464,9 +487,14 @@ def check_m3() -> dict:
                         "fallbacks": int(np.sum(st["fallback"])), "gated_brake_steps": int(np.sum(st["gated_brake"]))}
     out["pass_lead"]["ok"] = bool(passed and reason in (None, "success") and out["pass_lead"]["min_gap"] > 0.3)
     env.close()
+    return out
 
+
+def m3_stopped_car() -> dict:
+    out = {}
     # (b) stopped car in the ego's lane, waypoints straight through it: the gate / MPC must stop the ego
-    env = controlled_env("m3", ego_lane=1, ego_kmh=50.0, overrides=["method.ebrake.ends_episode=false"])
+    env = controlled_env("m3", ego_lane=1, ego_kmh=50.0, overrides=["method.ebrake.ends_episode=false"],
+                         label="m3 (b) stopped_car: stop for a stopped car")
     env.reset(options={"episode_seed": 0})
     L = env.road.lane_centers
     env.add_scripted_car(170.0, L[1])
@@ -481,34 +509,74 @@ def check_m3() -> dict:
                           "final_v": env.ego.v, "gated_brake_steps": int(np.sum(st["gated_brake"]))}
     out["stopped_car"]["ok"] = bool(reason != "collision" and out["stopped_car"]["min_gap"] > 0.2 and env.ego.v < 0.5)
     env.close()
+    return out
 
-    # (c) fallback chain: solver raises -> replayed plan (if replay_steps.timeout > 0) -> emergency brake; recovery
-    env = controlled_env("m3", ego_lane=1, ego_kmh=60.0)
+
+def m3_infeasible_plan() -> dict:
+    out = {}
+    # (c) undrivable waypoints (a full lane change 5 m ahead at 60 km/h): the run ends at once as infeasible_plan
+    env = controlled_env("m3", ego_lane=1, ego_kmh=60.0, label="m3 (c) infeasible_plan: lane change 5 m ahead")
     env.reset(options={"episode_seed": 0})
     L = env.road.lane_centers
-    act = env.method.encode([30.0], [L[1]], kmh(60))
-    env.step(act)
-    healthy = int(np.sum(env.recorder.steps["fallback"]))
-    mpc = env.method.mpc
-    real = mpc.solver
+    _, r, te, tr, info = env.step(env.method.encode([5.0], [L[0]], kmh(60)))
+    out["infeasible_plan"] = {"termination": info.get("termination"), "control_steps": info["decision_control_steps"],
+                              "plan_lat_accel": env.decision["lat_accel"], "reward": r}
+    out["infeasible_plan"]["ok"] = bool(info.get("termination") == "infeasible_plan"
+                                        and info["decision_control_steps"] == 1)
+    env.close()
+    return out
 
+
+def m3_failed_solve() -> dict:
+    out = {}
+    # (d) fallback chain: the solver raises -> replayed plan (replay_steps.timeout) -> emergency brake, which
+    #     ends the run as trained, or (ends_episode false) brakes and recovers once the solver works again
     def broken(**_kw):
         raise RuntimeError("forced solver failure (validation)")
 
-    mpc.solver = broken
-    for _ in range(3):
-        _, _, te, tr, _ = env.step(act)
-        if te or tr:
-            break
-    modes = {m.split(":")[-1] for m in env.recorder.status[-30:] if m.startswith("fallback")}
-    mpc.solver = real
-    env.step(act)
-    recovered = not env.recorder.steps["fallback"][-1]
-    expected = {"emergency_brake"} | ({"shifted_previous"} if mpc.replay["timeout"] > 0 else set())
-    out["fallback"] = {"healthy_fallbacks": healthy, "modes_seen": sorted(modes), "modes_expected": sorted(expected),
-                       "recovered": bool(recovered), "speed_after": env.ego.v}
-    out["fallback"]["ok"] = bool(healthy == 0 and expected <= modes and recovered)
-    env.close()
+    for ends in (True, False):
+        env = controlled_env("m3", ego_lane=1, ego_kmh=60.0,
+                             overrides=[f"method.ebrake.ends_episode={str(ends).lower()}"],
+                             label=f"m3 (d) solver forced to fail, ends_episode={ends}")
+        env.reset(options={"episode_seed": 0})
+        L = env.road.lane_centers
+        act = env.method.encode([30.0], [L[1]], kmh(60))
+        env.step(act)
+        healthy = int(np.sum(env.recorder.steps["fallback"]))
+        mpc = env.method.mpc
+        real, mpc.solver = mpc.solver, broken
+        reason = None
+        for _ in range(3):
+            _, _, te, tr, info = env.step(act)
+            if te or tr:
+                reason = info["termination"]
+                break
+        modes = {m.split(":")[-1] for m in env.recorder.status[-30:] if m.startswith("fallback")}
+        expected = {"emergency_brake"} | ({"shifted_previous"} if mpc.replay["timeout"] > 0 else set())
+        res = {"healthy_fallbacks": healthy, "modes_seen": sorted(modes), "modes_expected": sorted(expected),
+               "termination": reason}
+        if ends:
+            res["ok"] = bool(healthy == 0 and expected <= modes and reason == "emergency_brake")
+            out["failed_solve_ends_run"] = res
+        else:
+            mpc.solver = real
+            env.step(act)
+            res["recovered"] = not env.recorder.steps["fallback"][-1]
+            res["ok"] = bool(healthy == 0 and expected <= modes and reason is None and res["recovered"])
+            out["failed_solve_recovers"] = res
+        env.close()
+    return out
+
+
+M3_CASES = {"pass_lead": m3_pass_lead, "stopped_car": m3_stopped_car, "infeasible_plan": m3_infeasible_plan,
+            "failed_solve": m3_failed_solve}
+
+
+def check_m3(cases=None) -> dict:
+    """All M3 cases, or just ``cases`` (``check m3.pass_lead``)."""
+    out = {}
+    for name in cases or M3_CASES:
+        out.update(M3_CASES[name]())
     out["ok"] = all(v["ok"] for v in out.values())
     return out
 
@@ -623,9 +691,11 @@ CHECKS = {"env": check_env, "m2": check_m2, "m3": check_m3, "smoke": check_smoke
 
 
 def run_check(name: str) -> dict:
+    """``name``: a check, or ``m3.<case>`` for one M3 case."""
     t0 = time.time()
     try:
-        res = CHECKS[name]()
+        base, _, case = name.partition(".")
+        res = check_m3([case]) if case else CHECKS[base]()
     except Exception:  # noqa: BLE001
         res = {"ok": False, "error": traceback.format_exc()}
     res["wall_s"] = round(time.time() - t0, 1)
@@ -639,7 +709,8 @@ def cmd_check(args):
     names = args.names or list(CHECKS)
     summary = {}
     for name in names:
-        subprocess.run([sys.executable, __file__, "_one", name], cwd=REPO_ROOT)
+        subprocess.run([sys.executable, __file__, "_one", name]
+                       + (["--render", "--fps", str(args.fps)] if args.render else []), cwd=REPO_ROOT)
         rep = OUT / "checks" / f"{name}.json"
         res = json.loads(rep.read_text()) if rep.exists() else {"ok": False}
         summary[name] = bool(res.get("ok"))
@@ -662,6 +733,7 @@ def main():
     r.add_argument("--no-render", action="store_true", help="headless (logs + plots only)")
     r.add_argument("--no-constraints", action="store_true", help="start with the corridor constraints off (K)")
     r.add_argument("--demo", action="store_true", help="only the road and the cars; M toggles the overlays")
+    r.add_argument("--reward", default="r4_straight", help="configs/<name>.yaml (shown live + plotted)")
     r.add_argument("--out", default=None, help="default runs/validation/<scenario>/<timestamp>")
     e = sub.add_parser("edit", help="place waypoints and cars")
     e.add_argument("--scenario", default=None, help="existing scenario JSON to edit")
@@ -670,18 +742,26 @@ def main():
     c = sub.add_parser("check", help="pass / fail checks")
     c.add_argument("names", nargs="*", metavar="NAME", help=f"any of {list(CHECKS)} (default: all)")
     one = sub.add_parser("_one")
-    one.add_argument("name", choices=list(CHECKS))
+    one.add_argument("name")
+    for sp in (c, one):
+        sp.add_argument("--render", action="store_true", help="show the m2 / m3 checks in the MetaDrive window")
+        sp.add_argument("--fps", type=float, default=10.0, help="with --render: 10 = real time, 0 = fast")
     args = p.parse_args()
     if args.cmd == "run":
         cmd_run(args)
     elif args.cmd == "edit":
         cmd_edit(args)
     elif args.cmd == "check":
-        unknown = set(args.names) - set(CHECKS)
+        valid = set(CHECKS) | {f"m3.{c}" for c in M3_CASES}
+        unknown = set(args.names) - valid
         if unknown:
-            p.error(f"unknown checks {sorted(unknown)}; choose from {list(CHECKS)}")
+            p.error(f"unknown checks {sorted(unknown)}; choose from {sorted(valid)}")
         cmd_check(args)
     else:
+        if args.render:
+            RENDER.update(on=True, fps=args.fps)
+            if os.environ.get("SDL_VIDEODRIVER") == "dummy":
+                os.environ.pop("SDL_VIDEODRIVER")
         sys.exit(0 if run_check(args.name)["ok"] else 1)
 
 

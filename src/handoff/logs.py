@@ -24,19 +24,21 @@ from handoff.config import REPO_ROOT, save_config
 from handoff.reward import TERMS, crashed
 from handoff.sim import EGO_FIELDS, OBJECT_FIELDS, EgoState, pack_objects
 
-TERMINATIONS = ("success", "collision", "emergency_brake", "off_road", "timeout", "other")
+TERMINATIONS = ("success", "collision", "emergency_brake", "infeasible_plan", "off_road", "timeout", "other")
 STEP_SCALARS = ("reward", "tracking_error", "solve_time", "cpu_time", "fallback", "gated_brake", "min_gap",
                 "min_ttc", "ref_d", "ref_v", "ref_psi", "cmd_steering", "cmd_throttle", "decision_index")
 
 
 def termination_reason(info: dict, truncated: bool) -> str:
-    """Priority: success > collision > emergency_brake (M3) > off_road > timeout."""
+    """Priority: success > collision > emergency_brake (M3) > infeasible_plan (M3) > off_road > timeout."""
     if info.get("arrive_dest"):
         return "success"
     if crashed(info):
         return "collision"
     if info.get("emergency_brake"):
         return "emergency_brake"
+    if info.get("infeasible_plan"):
+        return "infeasible_plan"
     if info.get("out_of_road"):
         return "off_road"
     if truncated or info.get("max_step"):
@@ -46,8 +48,10 @@ def termination_reason(info: dict, truncated: bool) -> str:
 
 # ======================================================================================= recorder
 class EpisodeRecorder:
-    def __init__(self, out_dir: str | Path | None, max_objects: int, dt: float, max_steering_rad: float):
+    def __init__(self, out_dir: str | Path | None, max_objects: int, dt: float, max_steering_rad: float,
+                 weights: dict | None = None):
         self.out_dir = Path(out_dir) if out_dir else None
+        self.weights = weights or {}     # reward weights, saved with the log so it can be re-scored
         self.max_objects = max_objects
         self.dt = dt
         self.max_steering_rad = max_steering_rad
@@ -133,6 +137,7 @@ class EpisodeRecorder:
         arrays["tubes"] = _stack_ragged(self.tubes)              # (n, N+1, 4, 2) corridor box corners
         arrays["tube_trajs"] = _stack_ragged(self.tube_trajs)    # (n, N+1, 6) [s, d, v, x, y, psi]
         arrays["term_names"] = np.array(TERMS)
+        arrays["term_weights"] = np.array([float(self.weights.get(n, np.nan)) for n in TERMS])
         arrays["meta_keys"] = np.array(list(summary.keys()), dtype=str)
         arrays["meta_values"] = np.array([str(v) for v in summary.values()], dtype=str)
         tmp = path.with_suffix(".tmp.npz")

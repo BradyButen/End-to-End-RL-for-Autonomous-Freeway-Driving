@@ -1,0 +1,41 @@
+# R4 (2026-11-21, tuned by driving it: scripts/drive.py, scripts/validate.py run). Raw terms: src/handoff/reward.py.
+# Per control step (0.1 s), v_max = 80 km/h = 22.2 m/s:
+#   + 0.2 * progress (m)                                   ~ +200 for the ~1 km route, whatever the speed
+#   - 0.1 (time)                                           -1 /s
+#   - 2.0 * ((v - v_max) / v_max)^2  (speed_gap)           -5 /s at 40 km/h, -1.25 /s at 60, -0.31 /s at 70, 0 at 80
+#   - 2.7 * (|heading error| - 0.5 deg)+ (rad)             weaving +-0.5 m in lane for 100 s ~ -110
+#   - 0.2 outside +-0.57 m of a lane centre (lane_keep)    riding a line -2 /s
+#   - 5 * (G - gap) / G  (proximity)                       car overlapping sideways within G bumper to bumper:
+#                                                          G = 5 m ahead (-30 /s at 2 m), 2 m behind; -50 /s at contact
+#   lane_change: weight 0 (logged only: the lane_changes metric)
+# Terminal terms are ADDED: success +50; collision / off-road / M3 failed run (emergency_brake, infeasible_plan) -2000.
+#
+# One lane change (heading + lane_keep): ~ -5.5 at 20 m/s to -11 at 40 km/h; a pass (out and back) ~ -11 to -22.
+# Rough episode scores:
+#   finish at the 80 km/h cap (~45 s):            +200 - 45 + 50                    = ~ +205  (minus passes)
+#   finish at 70 km/h (~51 s):                    +200 - 51 + 50 - 16               = ~ +183
+#   finish stuck behind 40 km/h traffic (~90 s):  +200 - 90 + 50 - 450              = ~ -290
+#   timeout crawling at ~20 km/h (150 s):         +167 - 150 - 1688                 = ~ -1670
+#   crash / off-road / failed run late at speed:  +200 - 45 - 2000                  = ~ -1845
+#   crash / failed run early (e.g. undrivable waypoints on the first decision):     = ~ -2000
+#   standing still for 150 s:                        0 - 150 - 3000                 = ~ -3150
+# => stand still < crash ~ failed run < crawl to timeout < slow finish < fast finish.
+#   Known: standing still scores below a crash, and a crawl to the timeout is close to one; a policy that is stuck
+#   loses little by crashing / asking for undrivable waypoints. Restoring "a crash is always worst" needs
+#   speed_gap < ~0.55 at collision -2000 (standing still = -150 - 1500 * w).
+experiment:
+  reward_variant: r4_straight
+
+reward:
+  name: r4_straight
+  weights:                     # raw terms: src/handoff/reward.py
+    progress: 0.2              # per m along the route
+    time: 0.1                  # raw term is -1 per control step
+    success: 50.0
+    collision: -2000.0         # also an M3 failed run (emergency_brake, infeasible_plan)
+    off_road: -2000.0
+    lane_change: 0.0           # off (still logged as the lane_changes metric)
+    heading: 2.7               # per rad of heading error beyond 0.5 deg, per control step
+    speed_gap: 2.0             # x ((v - 80 km/h) / 80 km/h)^2 per control step (see "Known" above)
+    lane_keep: 0.2             # per control step outside the in-lane zone (raw term is -1 there)
+    proximity: 5.0             # per control step, x (G - gap) / G; G = 5 m to a car ahead, 2 m behind (reward.py)

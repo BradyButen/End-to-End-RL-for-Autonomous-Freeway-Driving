@@ -6,7 +6,8 @@ gamma and GAE lambda are set per 0.1 s and scaled to the decision period (x ** (
 has the same lookahead / credit window in seconds. Rationale for every setting: docs/TRAINING.md.
 
 Robustness: a crashed env / eval worker ends the job (FAILED.txt, checkpoints/crash.zip, all children killed,
-non-zero exit); the watchdog kills it (exit 3) if no PPO step or eval completes for ``training.watchdog_minutes``.
+non-zero exit); the watchdog kills it (exit 3) if nothing progresses for ``training.watchdog_minutes``: env start-up,
+every PPO env step, every finished eval episode and the final shutdown all count as progress.
 """
 
 from __future__ import annotations
@@ -31,7 +32,8 @@ from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNorm
 from handoff.evaluate import ParallelEvaluator, aggregate, policy_spec  # noqa: E402
 from handoff.logs import CsvAppender, make_run_dir  # noqa: E402
 
-EVAL_LOG_METRICS = ("success", "collision", "emergency_brake", "off_road", "timeout", "return", "mean_speed",
+EVAL_LOG_METRICS = ("success", "collision", "emergency_brake", "infeasible_plan", "off_road", "timeout", "return",
+                    "mean_speed",
                     "min_gap", "min_ttc", "rms_long_jerk", "rms_lat_accel", "rms_steer_rate", "tracking_error_rms",
                     "solve_time_mean", "solve_time_p95", "fallback_count", "gated_brake_count", "lane_changes",
                     "time_to_complete")
@@ -70,6 +72,18 @@ def _env_thunk(cfg: dict, rank: int, run_dir: Path):
         return Monitor(make_env(cfg, rank=rank, run_dir=run_dir, is_eval=False))
 
     return _thunk
+
+
+def _rss_gb() -> float:
+    """Resident memory (GB) of this process + every child (env and eval workers), from /proc (Linux)."""
+    total = 0
+    for pid in [os.getpid()] + [p.pid for p in mp.active_children()]:
+        try:
+            with open(f"/proc/{pid}/status") as f:
+                total += next(int(line.split()[1]) for line in f if line.startswith("VmRSS:"))   # kB
+        except (OSError, StopIteration, ValueError):
+            pass
+    return total / 1024**2
 
 
 def _kill_children(timeout: float = 10.0) -> None:
@@ -169,7 +183,7 @@ class TrainingCallback(BaseCallback):
                 self.recent = (self.recent + [summ])[-100:]
         self.episodes_csv.write(rows)
         if rows:
-            for k in ("success", "collision", "emergency_brake", "off_road", "return", "mean_speed"):
+            for k in ("success", "collision", "emergency_brake", "infeasible_plan", "off_road", "return", "mean_speed"):
                 self.logger.record(f"train/{k}", float(np.mean([r[k] for r in self.recent])))
         self.logger.record("counters/control_steps", self.control_steps)
         self.logger.record("counters/decisions", self.decisions)
@@ -199,10 +213,11 @@ class TrainingCallback(BaseCallback):
         el = time.time() - self.t_start
         msg = (f"[{self.cfg['method']['name']} {el / 60:5.1f} min] {self.control_steps / 1e3:7.1f}k steps "
                f"({self.control_steps / max(el, 1e-9):4.0f}/s, {self.control_steps * self.dt / 3600:.2f} h driven) | "
-               f"{self.episodes} ep | {self.rollouts} rollouts")
+               f"{self.episodes} ep | {self.rollouts} rollouts | mem {_rss_gb():.1f} GB")
         recent = self.recent[-50:]
         if recent:
-            crash = np.mean([max(r["collision"], r["emergency_brake"], r["off_road"]) for r in recent])
+            crash = np.mean([max(r["collision"], r["emergency_brake"], r["infeasible_plan"], r["off_road"])
+                             for r in recent])
             msg += (f" | last {len(recent)} ep: return {np.mean([r['return'] for r in recent]):7.1f}, "
                     f"success {np.mean([r['success'] for r in recent]):.2f}, crash {crash:.2f}, "
                     f"{np.mean([r['mean_speed'] for r in recent]) * 3.6:4.1f} km/h")
@@ -216,7 +231,8 @@ class TrainingCallback(BaseCallback):
         # CPU copy: eval workers run on CPU, and CUDA tensors must not be pickled across processes
         state = {k: v.detach().cpu() for k, v in self.model.policy.state_dict().items()}
         self.heartbeat()
-        summaries = self.evaluator.evaluate(state, self.eval_seeds, self.deterministic, tag=tag)
+        summaries = self.evaluator.evaluate(state, self.eval_seeds, self.deterministic, tag=tag,
+                                            heartbeat=self.heartbeat)
         self.heartbeat()
         self.episodes_csv.write([{**s, **self._counters(), "eval_tag": tag} for s in summaries])
         agg = aggregate(summaries)
@@ -245,6 +261,7 @@ def train(cfg: dict, run_dir: str | Path | None = None, verbose: int = 1) -> Pat
     torch.manual_seed(seed)
     if tr.get("torch_threads"):
         torch.set_num_threads(int(tr["torch_threads"]))
+    watchdog = Watchdog(tr.get("watchdog_minutes", 15), run_dir)   # from here on: covers env start-up too
     n_envs = int(tr["n_envs"])
     fns = [_env_thunk(cfg, i, run_dir) for i in range(n_envs)]
     vec = DummyVecEnv(fns) if n_envs == 1 else SubprocVecEnv(fns, start_method="spawn")   # one MetaDrive per process
@@ -263,7 +280,6 @@ def train(cfg: dict, run_dir: str | Path | None = None, verbose: int = 1) -> Pat
     if verbose:
         outputs.append(HumanOutputFormat(sys.stdout))
     model.set_logger(Logger(str(run_dir), outputs))
-    watchdog = Watchdog(tr.get("watchdog_minutes", 30), run_dir)
     try:
         # stopped by the control-step budget in the callback
         model.learn(total_timesteps=10**12, callback=TrainingCallback(cfg, run_dir, verbose, watchdog.beat),
@@ -281,6 +297,16 @@ def train(cfg: dict, run_dir: str | Path | None = None, verbose: int = 1) -> Pat
         watchdog.stop()
         _kill_children()
         raise
+    _close_envs(vec)
     watchdog.stop()
-    vec.close()
     return run_dir
+
+
+def _close_envs(vec, timeout: float = 120.0) -> None:
+    """Close the env workers, but never wait on a stuck one for more than ``timeout`` (checkpoints are saved)."""
+    t = threading.Thread(target=vec.close, daemon=True)
+    t.start()
+    t.join(timeout)
+    if t.is_alive():
+        print(f"env workers did not close within {timeout:.0f} s; killing them", file=sys.stderr, flush=True)
+        _kill_children()

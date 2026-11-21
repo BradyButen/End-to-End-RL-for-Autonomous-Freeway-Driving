@@ -1,10 +1,17 @@
-# M1: end-to-end. RL outputs [steering, throttle_brake] every control step.
+# M1: end-to-end. RL outputs [steering, target accel] every control step (src/handoff/m1.py).
 experiment:
   method: m1
 
 method:
   name: m1
   decision_period: 1           # control steps per RL decision
+  accel_range: [-4.0, 2.9]     # m/s^2 for action -1 / +1 (0 = hold speed), via the actuation table. +2.9 = full
+                               # throttle. -4 (not the -15.8 of full brake) keeps zero-mean noise near zero net accel:
+                               # bias = std * 0.8 * (2.9 - 4) / 2, about -0.2 m/s^2 at std 0.5
+
+training:                      # 7.5 h job: ~240 steps/s on gpu; memory ~42 GB at 2.2M steps (limit 140)
+  total_control_steps: 6000000
+  max_wall_minutes: 450
 
 ppo:                           # round 2: smaller, stabler updates (pilot approx_kl ~0.17, clip_fraction 0.4-0.5)
   n_steps: 1280                # decisions per env per rollout = 128 s of driving, same as M2 (256 x 0.5 s), M3 (128 x 1 s)

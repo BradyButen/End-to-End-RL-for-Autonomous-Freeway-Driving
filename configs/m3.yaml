@@ -64,6 +64,12 @@ method:
       tol: 0.001
       print_level: 0
 
+training:                      # 7 h of training (M3's final eval takes longer): ~93 steps/s on standard
+  total_control_steps: 2300000
+  max_wall_minutes: 420
+
 ppo:
   n_steps: 128                 # decisions per env per rollout (= 128 s of driving, same as M1 / M2)
   batch_size: 256
+  n_epochs: 4                  # round 2 (r3_fast) ran at approx_kl ~0.05, clip fraction 0.4-0.49: too large, though
+  target_kl: 0.03              # it did not collapse; same guard as M1 / M2

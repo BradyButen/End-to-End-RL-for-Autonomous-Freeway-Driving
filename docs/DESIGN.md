@@ -8,7 +8,7 @@ Where should learning hand off to control? Four drivers on the same freeway, sam
 
 | method | RL decides (every) | what turns it into steering/throttle |
 |---|---|---|
-| **M1** end-to-end | `[steering, throttle_brake]` (0.1 s) | nothing |
+| **M1** end-to-end | `[steering, target accel]` (0.1 s; accel 0 = hold speed, `method.accel_range`) | actuation table → throttle_brake |
 | **M2** RL + PID | target lateral offset d\*, target speed v\* (0.5 s) | quintic lateral profile + accel-limited speed profile (2 s), cascaded PID |
 | **M3** RL + MPC | up to 5 Frenet waypoints (Δs, d), target/max speed v\*, waypoint count (1 s) | spline → road corridor → hard-constrained MPC (+ emergency-brake gate) |
 | **B0** rule-based | — | MetaDrive's IDM at the 70 km/h target speed (evaluation only) |

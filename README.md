@@ -11,6 +11,7 @@ same reward.
 |---|---|
 | [docs/DESIGN.md](docs/DESIGN.md) | how the simulator, methods and logging work |
 | [docs/TRAINING.md](docs/TRAINING.md) | reward, PPO settings and why, pilot results, Great Lakes workflow |
+| [docs/human-data-pipeline.md](docs/human-data-pipeline.md) | human driving demos -> behaviour cloning -> PPO warm start (M1) |
 | [docs/SPEC_v2.md](docs/SPEC_v2.md) | original course specification (historical) |
 
 ## Setup (dev machine)
@@ -33,6 +34,8 @@ python scripts/view.py replay --episode <run>/episodes/<id>.npz --checkpoint <ru
 python scripts/plot.py curves runs/m*/r4_straight/seed_*/* --metric success
 python scripts/drive.py --seeds 1000 1003                                   # drive it yourself; reward plot after
 python scripts/plot.py reward runs/drive/<ts>/episodes/<id>.npz --reward r4 # re-score a drive / episode
+python scripts/compare.py runs/eval/b0 runs/m*/r4_straight/seed_*/* --out results/  # method comparison table
+python scripts/robustness.py --b0 --runs runs/m*/r4_straight/seed_*/*               # robustness sweep (configs/robustness.yaml)
 
 python scripts/validate.py run configs/validation/overtake.json             # M3 on hand-placed waypoints + cars
 python scripts/validate.py edit --out configs/validation/my_test.json       # place waypoints / cars, then Run

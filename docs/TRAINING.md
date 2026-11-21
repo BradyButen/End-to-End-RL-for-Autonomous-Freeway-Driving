@@ -42,11 +42,11 @@ Base (`configs/base.yaml`) unless a method overrides it (`configs/m1.yaml`, `m2.
 | γ | 0.99 per 0.1 s → M1 0.99, M2 0.951, M3 0.904 per decision | same ~10 s lookahead in seconds for every method |
 | GAE λ | 0.995 per 0.1 s → M1 0.995, M2 0.975, M3 0.951 per decision | **new.** A fixed λ = 0.95 per *decision* gave M1 a ~2 s credit window and M3 ~20 s. Scaled like γ, all methods get the same ~7 s window (1/(1−γλ) in seconds). |
 | rollout `n_steps` | M1 1280, M2 256, M3 128 per env | **new for M1.** = 128 s of driving per env per rollout for every method, so updates per simulated hour are equal (with 14 envs: one update per ~30 min of driving). Pilot: M1 70, M2 14, M3 7 updates in 2M steps. |
-| `batch_size` / `n_epochs` | M1 512 / 4; M2, M3 256 / 10 | M1's pilot updates were too large (approx_kl rose 0.01 → 0.23, clip fraction 0.35–0.49, value loss 0.1 → 22): fewer epochs, bigger batches, plus `target_kl 0.03` (stops an update early when the policy moves too far). M2/M3 rollouts are smaller (1.8k–3.6k decisions), so the default 10 epochs are fine. |
+| `batch_size` / `n_epochs` / `target_kl` | M1 512 / 4 / 0.03; M2, M3 256 / 4 / 0.03 | **Update guard.** Each PPO update makes `n_epochs` passes over the last rollout; approx_kl measures how far that moves the policy's action distribution. Small moves keep the rollout data valid for the new policy; large ones step into untested territory, the policy gets worse, collects worse data, and spirals. `target_kl` stops an update's passes early once approx_kl exceeds it; fewer epochs and (M2) a smaller learning rate keep each step small. Healthy: approx_kl < ~0.02, clip fraction 0.1–0.2. Evidence: M1 pilot approx_kl 0.01 → 0.23 (guard added; round 3 stayed ~0.01); M2 round 3 approx_kl 0.006 → 0.55, clip fraction 0.66, eval success 1.0 → 0 after 1.2M steps (M2 also collapsed in round 2); M3 round 2 ~0.05 / 0.4–0.49 without collapsing. |
 | `log_std_init` | −0.7 (initial std 0.5) | **new.** SB3's default std 1 on a [−1, 1] action box clips ~32 % of samples to the limits. Pilot: M3's std stayed 0.98 for the whole run (near-random rollouts: 50 % training collisions vs 0 % in deterministic eval); M2's first third was 100 % off-road within 8 s; M1 steered randomly at speed. Std 0.5 clips ~5 %. |
 | `ent_coef` | 0 | exploration is set by `log_std_init`; an entropy bonus would push std back up |
 | reward normalisation | on (`VecNormalize`, rewards only), clip ±100 | **new.** Returns span −500…+105; normalising by the running return std keeps the value loss from swamping the policy loss (pilot explained variance ≈ 0.5). Clip raised from SB3's 10 so the crash penalty is not clipped early in training. Logs and eval stay raw. |
-| `learning_rate`, `clip_range` | 3e-4, 0.2 | SB3 defaults; no evidence yet to change |
+| `learning_rate`, `clip_range` | 3e-4 (M2 1e-4), 0.2 | SB3 defaults; M2 lowered with the update guard |
 | eval | 40 seeds (1000–1039), deterministic, every 200k control steps | 2.5 % resolution on rates (20 seeds = 5 %); best checkpoint = highest success, ties by return |
 | episode cap | 150 s | longest route stuck behind the slowest lane (35 km/h) takes 118 s; 120 s left no margin |
 
@@ -111,36 +111,40 @@ Budget for a 4–5 h run ≈ control steps/s × 4.5 h × 3600 × 0.8 (eval + PPO
 Sizing from round 2 (14 training envs + 4 eval workers, 20 cores, 4 GB/core, 40 eval episodes every 200k steps;
 control steps/s including eval): M1 ~175 on `gpu`, M2 ~195 and M3 ~93 on `standard`. All three methods get the
 same budget (equal simulated experience, D-07); only the wall time differs. Round 2 lost all three runs: M1 and M3
-hit the time limit, M2 was OOM-killed at 80 GB after 3.9 h (memory grows over the run, most likely MetaDrive per
-episode reset; M2 had the most episodes). The progress line now prints `mem <GB>` (main + all workers): extrapolate
-its growth in the first hour, and check `sacct -j <id> --format=MaxRSS` afterwards.
+hit the time limit, M2 was OOM-killed at 80 GB after 3.9 h. Cause (found round 3): MetaDrive's map cache
+(`store_map`, default true) keeps every visited seed's map in each process, ~10 MB each, up to 1040 seeds: memory
+grew ~10 MB per episode (a laptop warm-start trial reached 38 GB in 28 min). `sim.store_map: false` (base.yaml)
+rebuilds the seed's map on every reset instead (same map, so replays and evals are unchanged). The progress line
+prints `mem <GB>` (main + all workers): it should now level off; check `sacct -j <id> --format=MaxRSS` afterwards.
 
 Jobs are capped at 8 h. `training.max_wall_minutes` stops the training loop in time for the final eval and
 final.zip: 450 min for M1 / M2 (final eval ~10-15 min), 420 min for M3 (final eval up to ~40 min: 40 episodes of
-up to 150 s on 4 workers), plus ~5 min start-up. At round-2 speeds M3 reaches ~2.3M control steps in 7 h, so the
-common budget is 2.2M: every method gets the same experience (M1 / M2 finish in ~3.5 h), and the wall-clock stop
-is only a safety net. (Alternative: let M1 / M2 use their full 7.5 h and compare all methods at 2.2M from the eval
-every 200k steps and the checkpoint every 100k.)
+up to 150 s on 4 workers), plus ~5 min start-up. Round 3 (2.2M each) finished M1 in 2.5 h (~240
+steps/s) and M2 in 3.3 h, so the budgets now live in each method's config and use most of the 7.5 h; M2's is the
+first one after the memory fix (it was 72 GB at 2.2M before), so watch its `mem` line. Compare methods at equal experience from the eval every 200k
+steps and the checkpoint every 100k.
 
-| | partition | budget | `max_wall_minutes` | expected training time |
-|---|---|---|---|---|
-| M1 | `gpu` | 2.2M | 450 | ~3.5 h |
-| M2 | `standard` | 2.2M | 450 | ~3.1 h |
-| M3 | `standard` | 2.2M | 420 | ~6.6 h |
+| | partition | budget (`configs/<m>.yaml`) | `max_wall_minutes` | expected training time | memory at end |
+|---|---|---|---|---|---|
+| M1 | `gpu` | 6.0M | 450 | ~7 h | ~115 GB |
+| M2 | `standard` | 4.5M | 450 | ~6.8 h | flat (was 72 GB at 2.2M before the fix) |
+| M3 | `standard` | 2.3M | 420 | ~7 h | |
 
 M1 on `gpu`: its rollouts are 18k samples × 4 epochs through the CNN, which would eat much of its time on 2 CPU
 threads; M2 / M3 updates are small (3.6k / 1.8k samples), so `standard` is fine. Memory: ask for 7 GB/core
 (140 GB for 20 cores) until the `mem` line shows the real growth rate (check the node's total with
 `scontrol show node <node>`).
 
-Launch (seed 0; `r4_straight` is the default reward; `--time=08:00:00` is the script default):
+Launch a batch (`r4_straight` is the default reward; `--time=08:00:00` is the script default). Per seed:
+M1 from scratch and M1 warm-started from the behaviour-cloning clone (`gpu`), M2 and M3 (`standard`):
 ```bash
-EV='--set training.total_control_steps=2200000'
-sbatch --partition=gpu --mem-per-cpu=7g --export="ALL,METHOD=m1,SEED=0,EXTRA=$EV --set training.max_wall_minutes=450" slurm/train.sbatch
-sbatch --partition=standard --gres=none --mem-per-cpu=7g --export="ALL,METHOD=m2,SEED=0,EXTRA=$EV --set training.max_wall_minutes=450" slurm/train.sbatch
-sbatch --partition=standard --gres=none --mem-per-cpu=7g --export="ALL,METHOD=m3,SEED=0,EXTRA=$EV --set training.max_wall_minutes=420" slurm/train.sbatch
-sbatch --array=0-8%3 slurm/train_array.sbatch     # later: 3 methods x 3 seeds
+DRY=1 bash slurm/launch_batch.sh              # print the sbatch commands
+bash slurm/launch_batch.sh                    # seed 0: 4 jobs
+SEEDS="0 1 2" bash slurm/launch_batch.sh      # 12 jobs
+JOBS="m1_warm" SEEDS="1 2" bash slurm/launch_batch.sh
 ```
+Warm start (docs/human-data-pipeline.md): `training.init_policy=data/bc/m1_clone.zip`, `init_log_std=-2.0`,
+`critic_warmup_control_steps=100000`, output under `runs/warm/`, Slurm log `slurm-handoff-warm-<id>.out`.
 `train.sbatch`: 20 cores → 14 training envs + 4 eval workers + main; `OMP_NUM_THREADS=1`. Each run writes
 `runs/<method>/r4_straight/seed_<n>/<timestamp>/`. Check `sacct -j <id> --format=MaxRSS` and lower `--mem-per-cpu`
 if far below 80 GB.

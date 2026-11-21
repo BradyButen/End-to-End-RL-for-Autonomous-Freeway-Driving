@@ -92,6 +92,8 @@ def load_run_config(run_dir: str | Path, overrides: list[str] | None = None) -> 
     exp = saved["experiment"]
     cfg = deep_merge(load_config(exp["method"], scenario=exp.get("scenario", "freeway")), saved)
     cfg["reward"] = saved["reward"]
+    if exp["method"] == "m1" and "accel_range" not in saved.get("method", {}):
+        cfg["method"]["accel_range"] = None     # trained before the accel re-map: raw throttle_brake
     return apply_overrides(cfg, overrides)
 
 

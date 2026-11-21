@@ -37,6 +37,10 @@ slurm-*.out
 # Large binaries, everywhere (including result snapshots): checkpoints and per-episode logs
 *.zip
 *.npz
+# ...except the curated human driving demos (scripts/drive.py): small, tracked for imitation learning
+!data/human_demos/*.npz
+# ...and the behaviour-cloning clone used as the PPO warm start (scripts/bc.py; training.init_policy)
+!data/bc/*.zip
 *.pt
 *.pth
 *.ckpt
@@ -46,3 +50,5 @@ slurm-*.out
 
 # Figures go in a snapshot's plots/ folder, not the repo root
 /*.png
+
+Nav565-Team16-ProjectProposal.pdf

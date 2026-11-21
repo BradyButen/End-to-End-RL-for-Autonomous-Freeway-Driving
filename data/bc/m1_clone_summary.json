@@ -1,0 +1,79 @@
+{
+  "best_epoch": 17,
+  "best": {
+    "epoch": 17,
+    "train_loss": 0.18471350596512232,
+    "val_loss": 3.145558371631492,
+    "val_steer_mae": 0.040406521409749985,
+    "val_steer_mae_active": 0.13119418919086456,
+    "val_steer_sign_acc": 0.6914893617021277,
+    "val_throttle_mae": 0.1680673509836197,
+    "drive_dist": 277.3107581138611,
+    "drive_success": 0.0,
+    "drive_off_road": 0.2,
+    "drive_collision": 0.8,
+    "seconds": 210.82909965515137
+  },
+  "baseline_val_loss": 3.4123616218566895,
+  "drive_seeds": [
+    100,
+    101,
+    102,
+    103,
+    104,
+    105,
+    106,
+    107,
+    108,
+    109
+  ],
+  "train_samples": 6696,
+  "val_samples": 1524,
+  "val_episodes": [
+    8,
+    10,
+    12
+  ],
+  "val_seeds": [
+    391,
+    856,
+    903
+  ],
+  "steer_active_frac": 0.12171445639187575,
+  "brake_frac": 0.008661887694145758,
+  "steer_weight": 3.0,
+  "brake_weight": 3.0,
+  "args": {
+    "data": "runs/demos/m1.npz",
+    "out": "runs/bc/m1/sweep_wd_w3",
+    "reward": "r4_straight",
+    "epochs": 20,
+    "batch_size": 128,
+    "lr": 0.0003,
+    "weight_decay": 0.05,
+    "val_episodes": 3,
+    "max_weight": 3.0,
+    "patience": 8,
+    "select": "drive",
+    "drive_seeds": [
+      100,
+      101,
+      102,
+      103,
+      104,
+      105,
+      106,
+      107,
+      108,
+      109
+    ],
+    "drive_every": 1,
+    "n_workers": 5,
+    "keep_prev_action": false,
+    "seed": 0
+  },
+  "masked_feature_columns": [
+    259,
+    260
+  ]
+}

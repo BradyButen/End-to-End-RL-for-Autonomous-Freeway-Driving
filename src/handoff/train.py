@@ -129,6 +129,48 @@ class Watchdog:
                 os._exit(3)
 
 
+# ======================================================================================= warm start
+CRITIC_PREFIXES = ("mlp_extractor.value_net.", "value_net.")   # policy state-dict keys that belong to the critic
+
+
+def actor_parameters(policy) -> list:
+    """Parameters that set the action: CNN / features extractor (shared with the critic), policy MLP, action head,
+    log_std. Frozen during the critic warm-up."""
+    params = (list(policy.features_extractor.parameters()) + list(policy.mlp_extractor.policy_net.parameters())
+              + list(policy.action_net.parameters()) + [policy.log_std])
+    if not policy.share_features_extractor:
+        params += list(policy.pi_features_extractor.parameters())
+    return params
+
+
+def warm_start(model, cfg: dict) -> str | None:
+    """Load the actor of ``training.init_policy`` into ``model`` (critic and log_std stay as initialised; log_std is
+    then set from ``training.init_log_std``). Returns a one-line description, or None when no warm start is set."""
+    from handoff.config import REPO_ROOT
+
+    tr = cfg["training"]
+    path = tr.get("init_policy")
+    if not path:
+        return None
+    path = Path(path) if Path(path).is_absolute() else REPO_ROOT / path
+    if not path.exists():
+        raise FileNotFoundError(f"training.init_policy: {path} does not exist")
+    src = PPO.load(str(path), device="cpu").policy.state_dict()
+    dst = model.policy.state_dict()
+    actor = {k: v for k, v in src.items() if not k.startswith(CRITIC_PREFIXES) and k != "log_std"}
+    missing = [k for k in dst if not k.startswith(CRITIC_PREFIXES) and k != "log_std" and k not in actor]
+    bad = [k for k, v in actor.items() if k not in dst or dst[k].shape != v.shape]
+    if missing or bad:
+        raise ValueError(f"training.init_policy {path} does not match this policy (wrong method / observation?): "
+                         f"missing {missing[:3]}, mismatched {bad[:3]}")
+    model.policy.load_state_dict(actor, strict=False)
+    if tr.get("init_log_std") is not None:
+        with torch.no_grad():
+            model.policy.log_std.fill_(float(tr["init_log_std"]))
+    std = model.policy.log_std.exp().detach().cpu().numpy().round(3).tolist()
+    return f"warm start: actor from {path} ({len(actor)} tensors), action std {std}"
+
+
 # ======================================================================================= callback
 class TrainingCallback(BaseCallback):
     """Episode rows -> episodes.csv; checkpoints, evaluations (step 0, every eval.freq_control_steps, final) and
@@ -153,6 +195,18 @@ class TrainingCallback(BaseCallback):
         self.best = (-np.inf, -np.inf)
         self.evaluator: ParallelEvaluator | None = None
         self.recent: list[dict] = []
+        # critic warm-up (warm start only): actor frozen until this many control steps
+        self.warmup = int(float(tr.get("critic_warmup_control_steps") or 0)) if tr.get("init_policy") else 0
+        self.actor_frozen = False
+
+    def _freeze_actor(self, frozen: bool) -> None:
+        for p in actor_parameters(self.model.policy):
+            p.requires_grad_(not frozen)
+        self.actor_frozen = frozen
+        if self.verbose:
+            state = (f"frozen: critic warm-up for {self.warmup} control steps" if frozen
+                     else f"unfrozen at {self.control_steps} control steps: full PPO from here")
+            print(f"[warm start] actor {state}", flush=True)
 
     def _counters(self) -> dict:
         return {"train_control_steps": self.control_steps, "train_decisions": self.decisions,
@@ -161,6 +215,8 @@ class TrainingCallback(BaseCallback):
     def _on_training_start(self) -> None:
         self.t_start = time.time()
         self.next_progress = self.t_start + self.progress_s
+        if self.warmup > 0:
+            self._freeze_actor(True)
         if self.next_eval is not None:
             self.evaluator = ParallelEvaluator(self.cfg, self.run_dir, self.n_eval_workers, policy_spec(self.model))
             self._evaluate()   # step 0 (untrained policy) anchors the learning curve
@@ -173,6 +229,9 @@ class TrainingCallback(BaseCallback):
 
     def _on_rollout_end(self) -> None:
         self.rollouts += 1     # a PPO update follows every rollout
+        if self.actor_frozen and self.control_steps >= self.warmup:
+            self._freeze_actor(False)   # takes effect from the update that follows this rollout
+        self.logger.record("train/actor_frozen", float(self.actor_frozen))
 
     def _on_step(self) -> bool:
         self.heartbeat()
@@ -280,6 +339,11 @@ def train(cfg: dict, run_dir: str | Path | None = None, verbose: int = 1) -> Pat
         vec = VecNormalize(vec, norm_obs=False, norm_reward=True, gamma=method_gamma(cfg),
                            clip_reward=float(tr.get("reward_clip", 10.0)))
     model = PPO("MultiInputPolicy", vec, seed=seed, device=tr.get("device", "auto"), verbose=0, **ppo_kwargs(cfg))
+    ws = warm_start(model, cfg)
+    if ws:
+        (run_dir / "warm_start.txt").write_text(ws + "\n")
+        if verbose:
+            print(ws)
     (run_dir / "device.txt").write_text(f"{model.device} torch={torch.__version__} cuda_available="
                                         f"{torch.cuda.is_available()} threads={torch.get_num_threads()}\n")
     if verbose:

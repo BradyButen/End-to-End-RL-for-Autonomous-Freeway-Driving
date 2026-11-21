@@ -46,6 +46,9 @@ def make_metadrive_config(cfg: dict, render: bool = False, agent_policy=None) ->
         decision_repeat=sim["decision_repeat"],
         horizon=sim["horizon"],
         start_seed=0,
+        store_map=bool(sim.get("store_map", False)),   # MetaDrive default True keeps every visited map (~10 MB each,
+                                                       # up to num_scenarios per process): the memory growth that
+                                                       # OOM-killed runs. False rebuilds the seed's map on reset.
         num_scenarios=max(int(seeds["train_high"]), max(int(s) for s in seeds["eval"]) + 1),
         map=sim["map"]["blocks"],
         map_config={"lane_num": sim["map"]["lane_num"], "lane_width": sim["map"]["lane_width"]},

@@ -21,6 +21,13 @@ method:
     integral_limit: 5.0
     speed_feedforward: true    # add a_ref -> throttle_brake feed-forward from the actuation table
 
+training:                      # 7.5 h job: ~185 steps/s on standard (~5M possible). Round 3 memory grew to 72 GB at
+  total_control_steps: 4500000 # 2.2M steps (MetaDrive's map cache, now off: sim.store_map). Check that the `mem` line
+  max_wall_minutes: 450        # stays flat; if it still climbs ~30 GB/M steps, 3.5M is the 140 GB-safe budget
+
 ppo:                           # round 2: more updates per control step (pilot: ~14 updates in 2M steps)
   n_steps: 256                 # decisions per env per rollout (= 128 s of driving, same as M1/M3)
   batch_size: 256
+  n_epochs: 4                  # round 3: update guard (approx_kl rose 0.006 -> 0.55, clip fraction 0.66, eval
+  target_kl: 0.03              # success 1.0 -> 0 after 1.2M steps); same guard as M1, plus a smaller step size
+  learning_rate: 0.0001

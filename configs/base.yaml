@@ -12,6 +12,8 @@ sim:
   physics_world_step_size: 0.02
   decision_repeat: 5        # control step = 0.1 s
   control_dt: 0.1
+  store_map: false          # MetaDrive's map cache (default true) keeps every visited seed's map in each process
+                            # (~10 MB each, 1040 seeds): memory grew ~10 MB per episode until OOM. false = rebuild
   horizon: 1500             # control steps before timeout (truncated); 150 s (longest route 1144 m = 103 s at the
                             # 40 km/h traffic speed; 120 s left too little margin)
   on_continuous_line_done: true
@@ -103,6 +105,16 @@ training:
                                # PPO steps, each eval episode and shutdown count. Must exceed one M3 eval episode
                                # (<= 150 s simulated, a few min wall) and one PPO update. 0 disables.
                                # A crashed worker (exception / segfault) ends the job immediately instead.
+  # Warm start (docs/human-data-pipeline.md). All off by default: a normal run starts PPO from random weights.
+  init_policy: null            # SB3 .zip (e.g. a behaviour-cloning clone from scripts/bc.py): its ACTOR (CNN, policy
+                               # MLP, action head) is loaded; the critic and log_std stay freshly initialised.
+                               # Must be for the same method / observation / action space. Relative to the repo root.
+  init_log_std: null           # with init_policy: initial log action std (null = ppo.policy_kwargs.log_std_init).
+                               # The clone's actions are precise (human steering std ~0.06); the default std 0.5 would
+                               # bury them in noise. -2.0 -> std 0.135.
+  critic_warmup_control_steps: 0   # with init_policy: train ONLY the value net (actor + CNN frozen) for this many
+                               # control steps first, so the first PPO updates use a sensible advantage estimate
+                               # instead of a random critic's and do not wreck the loaded actor. 0 = off.
 
 ppo:                           # SB3 PPO kwargs (defaults unless overridden in method/*.yaml)
   learning_rate: 0.0003

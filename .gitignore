@@ -39,6 +39,8 @@ slurm-*.out
 *.npz
 # ...except the curated human driving demos (scripts/drive.py): small, tracked for imitation learning
 !data/human_demos/*.npz
+# ...and the behaviour-cloning clone used as the PPO warm start (scripts/bc.py; training.init_policy)
+!data/bc/*.zip
 *.pt
 *.pth
 *.ckpt

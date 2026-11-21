@@ -14,7 +14,7 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=20
 #SBATCH --mem-per-cpu=4g
-#SBATCH --time=04:00:00
+#SBATCH --time=08:00:00
 #SBATCH --array=0-8
 #SBATCH --output=slurm-%x-%A_%a.out
 #SBATCH --mail-type=END,FAIL             # email when the job ends or fails (to the submitting uniqname@umich.edu)

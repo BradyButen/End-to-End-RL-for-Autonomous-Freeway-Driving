@@ -87,6 +87,8 @@ eval:
 
 training:
   total_control_steps: 2000000
+  max_wall_minutes: null       # safety stop for the training loop (step-0 / periodic evals included); the final eval
+                               # and final.zip still run after it, so leave ~30 min (M3: ~45) before the Slurm limit
   progress_seconds: 60         # print a one-line status (time, steps/s, episodes, recent return/success/crash)
   n_envs: 4
   checkpoint_freq_control_steps: 100000

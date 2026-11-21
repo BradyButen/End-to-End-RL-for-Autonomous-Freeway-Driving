@@ -1,7 +1,9 @@
 """PPO training (Stable-Baselines3, MultiInputPolicy), identical for M1 / M2 / M3.
 
 Budgets and cadences (total, eval, checkpoint) are counted in CONTROL STEPS (0.1 s of simulated driving, summed
-over envs), so every method gets the same simulated experience whatever its decision period.
+over envs), so every method gets the same simulated experience whatever its decision period. ``max_wall_minutes``
+is a safety stop on top (Slurm time cap): the loop (step-0 eval included) stops after that long, then the final
+eval and final.zip still run, so leave room for them before the job's time limit.
 gamma and GAE lambda are set per 0.1 s and scaled to the decision period (x ** (T_decision / 0.1 s)) so every method
 has the same lookahead / credit window in seconds. Rationale for every setting: docs/TRAINING.md.
 
@@ -142,6 +144,8 @@ class TrainingCallback(BaseCallback):
         self.eval_freq, self.ckpt_freq = int(ev["freq_control_steps"]), int(tr["checkpoint_freq_control_steps"])
         self.n_eval_workers, self.deterministic = int(ev.get("n_workers", 1)), bool(ev.get("deterministic", True))
         self.progress_s = float(tr.get("progress_seconds") or 0)
+        wall = tr.get("max_wall_minutes")
+        self.wall_limit_s = float(wall) * 60.0 if wall else None   # stop the training loop after this long
         self.episodes_csv = CsvAppender(run_dir / "episodes.csv")
         self.control_steps = self.decisions = self.episodes = self.rollouts = 0
         self.next_eval = self.eval_freq if self.eval_freq > 0 else None
@@ -199,6 +203,10 @@ class TrainingCallback(BaseCallback):
         if self.progress_s > 0 and time.time() >= self.next_progress:
             self._print_progress()
             self.next_progress = time.time() + self.progress_s
+        if self.wall_limit_s is not None and time.time() - self.t_start > self.wall_limit_s:
+            print(f"[stop] wall-clock limit {self.wall_limit_s / 3600:.2f} h reached at {self.control_steps} control "
+                  "steps; final eval + save follow", flush=True)
+            return False
         return self.control_steps < self.budget
 
     def _save(self, name: str) -> None:

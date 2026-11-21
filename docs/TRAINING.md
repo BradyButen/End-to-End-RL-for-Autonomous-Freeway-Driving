@@ -115,22 +115,30 @@ hit the time limit, M2 was OOM-killed at 80 GB after 3.9 h (memory grows over th
 episode reset; M2 had the most episodes). The progress line now prints `mem <GB>` (main + all workers): extrapolate
 its growth in the first hour, and check `sacct -j <id> --format=MaxRSS` afterwards.
 
-| budget (control steps) | M1 (`gpu`) | M2 (`standard`) | M3 (`standard`) |
-|---|---|---|---|
-| 2M | ~3.2 h → `--time=05:00:00` | ~2.9 h → `05:00:00` | ~6.0 h → `09:00:00` |
-| 3M (M2 was still improving at 2.7M) | ~4.8 h → `07:00:00` | ~4.3 h → `07:00:00` | ~9.0 h → `12:00:00` |
+Jobs are capped at 8 h. `training.max_wall_minutes` stops the training loop in time for the final eval and
+final.zip: 450 min for M1 / M2 (final eval ~10-15 min), 420 min for M3 (final eval up to ~40 min: 40 episodes of
+up to 150 s on 4 workers), plus ~5 min start-up. At round-2 speeds M3 reaches ~2.3M control steps in 7 h, so the
+common budget is 2.2M: every method gets the same experience (M1 / M2 finish in ~3.5 h), and the wall-clock stop
+is only a safety net. (Alternative: let M1 / M2 use their full 7.5 h and compare all methods at 2.2M from the eval
+every 200k steps and the checkpoint every 100k.)
+
+| | partition | budget | `max_wall_minutes` | expected training time |
+|---|---|---|---|---|
+| M1 | `gpu` | 2.2M | 450 | ~3.5 h |
+| M2 | `standard` | 2.2M | 450 | ~3.1 h |
+| M3 | `standard` | 2.2M | 420 | ~6.6 h |
 
 M1 on `gpu`: its rollouts are 18k samples × 4 epochs through the CNN, which would eat much of its time on 2 CPU
 threads; M2 / M3 updates are small (3.6k / 1.8k samples), so `standard` is fine. Memory: ask for 7 GB/core
 (140 GB for 20 cores) until the `mem` line shows the real growth rate (check the node's total with
 `scontrol show node <node>`).
 
-Launch (seed 0; `r4_straight` is the default reward):
+Launch (seed 0; `r4_straight` is the default reward; `--time=08:00:00` is the script default):
 ```bash
-EV='--set training.total_control_steps=3000000'
-sbatch --partition=gpu --time=07:00:00 --mem-per-cpu=7g --export="ALL,METHOD=m1,SEED=0,EXTRA=$EV" slurm/train.sbatch
-sbatch --partition=standard --gres=none --time=07:00:00 --mem-per-cpu=7g --export="ALL,METHOD=m2,SEED=0,EXTRA=$EV" slurm/train.sbatch
-sbatch --partition=standard --gres=none --time=12:00:00 --mem-per-cpu=7g --export="ALL,METHOD=m3,SEED=0,EXTRA=$EV" slurm/train.sbatch
+EV='--set training.total_control_steps=2200000'
+sbatch --partition=gpu --mem-per-cpu=7g --export="ALL,METHOD=m1,SEED=0,EXTRA=$EV --set training.max_wall_minutes=450" slurm/train.sbatch
+sbatch --partition=standard --gres=none --mem-per-cpu=7g --export="ALL,METHOD=m2,SEED=0,EXTRA=$EV --set training.max_wall_minutes=450" slurm/train.sbatch
+sbatch --partition=standard --gres=none --mem-per-cpu=7g --export="ALL,METHOD=m3,SEED=0,EXTRA=$EV --set training.max_wall_minutes=420" slurm/train.sbatch
 sbatch --array=0-8%3 slurm/train_array.sbatch     # later: 3 methods x 3 seeds
 ```
 `train.sbatch`: 20 cores → 14 training envs + 4 eval workers + main; `OMP_NUM_THREADS=1`. Each run writes

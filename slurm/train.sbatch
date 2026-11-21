@@ -15,8 +15,8 @@
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=20              # training envs + eval workers + main process
 #SBATCH --mem-per-cpu=4g
-#SBATCH --time=04:00:00                 # override per method: round 2 ran ~175 (M1, gpu), ~195 (M2), ~93 (M3)
-                                        # control steps/s incl. eval; see docs/TRAINING.md §7
+#SBATCH --time=08:00:00                 # cluster cap; training.max_wall_minutes stops the loop in time for the
+                                        # final eval (450 min M1/M2, 420 M3). docs/TRAINING.md §7
 #SBATCH --output=slurm-%x-%j.out
 #SBATCH --mail-type=END,FAIL             # email when the job ends or fails (to the submitting uniqname@umich.edu)
 

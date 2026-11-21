@@ -24,12 +24,12 @@ run() { if [[ -n "${DRY:-}" ]]; then echo "$*"; else "$@"; fi; }
 for S in $SEEDS; do
   for J in $JOBS; do
     case $J in
-      m1)      run sbatch --partition=gpu --mem-per-cpu="$MEM" --export="ALL,METHOD=m1,SEED=$S" slurm/train.sbatch ;;
-      m1_warm) run sbatch --partition=gpu --mem-per-cpu="$MEM" --job-name=handoff-warm \
+      m1)      run sbatch --time=08:00:00 --partition=gpu --mem-per-cpu="$MEM" --export="ALL,METHOD=m1,SEED=$S" slurm/train.sbatch ;;
+      m1_warm) run sbatch --time=08:00:00 --partition=gpu --mem-per-cpu="$MEM" --job-name=handoff-warm \
                  --export="ALL,METHOD=m1,SEED=$S,EXTRA=$WARM" slurm/train.sbatch ;;
-      m2)      run sbatch --partition=standard --gres=none --mem-per-cpu="$MEM" \
+      m2)      run sbatch --time=08:00:00 --partition=standard --gres=none --mem-per-cpu="$MEM" \
                  --export="ALL,METHOD=m2,SEED=$S" slurm/train.sbatch ;;
-      m3)      run sbatch --partition=standard --gres=none --mem-per-cpu="$MEM" \
+      m3)      run sbatch --time=08:00:00 --partition=standard --gres=none --mem-per-cpu="$MEM" \
                  --export="ALL,METHOD=m3,SEED=$S" slurm/train.sbatch ;;
       *) echo "unknown job $J (m1, m1_warm, m2, m3)"; exit 1 ;;
     esac

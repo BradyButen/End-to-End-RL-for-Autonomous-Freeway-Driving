@@ -37,6 +37,8 @@ slurm-*.out
 # Large binaries, everywhere (including result snapshots): checkpoints and per-episode logs
 *.zip
 *.npz
+# ...except the curated human driving demos (scripts/drive.py): small, tracked for imitation learning
+!data/human_demos/*.npz
 *.pt
 *.pth
 *.ckpt

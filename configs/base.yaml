@@ -1,10 +1,10 @@
-# Base configuration. Merge order (spec §14):
-#   base.yaml -> scenario/<s>.yaml -> method/<m>.yaml -> reward/<r>.yaml -> CLI overrides (key.sub=value)
+# Base configuration. Merge order (src/handoff/config.py):
+#   base.yaml -> <scenario>.yaml (freeway) -> <method>.yaml (m1 m2 m3 b0) -> <reward>.yaml (r3_fast) -> --set key.sub=value
 
 experiment:
-  method: m1               # set by method/<m>.yaml
-  reward_variant: r3_fast  # set by reward/<r>.yaml (r3_fast is the only reward)
-  scenario: freeway        # set by scenario/<s>.yaml
+  method: m1               # set by <method>.yaml
+  reward_variant: r3_fast  # set by <reward>.yaml (r3_fast is the only reward)
+  scenario: freeway        # set by <scenario>.yaml
   seed: 0                  # training seed (PPO init + training-episode seed stream)
   runs_root: runs
 
@@ -16,10 +16,11 @@ sim:
                             # 40 km/h traffic speed; 120 s left too little margin)
   on_continuous_line_done: true
   log_level: 50             # MetaDrive logging (50 = CRITICAL only)
+  render_clean: false       # viewer only: hide MetaDrive's navigation marks, dashboard and FPS counter
   metadrive_overrides:
     # Destroy objects on reset instead of reusing MetaDrive's object buffer: makes physics bit-exact across
     # episodes in one process (reused objects carry ~1e-5 m state noise that closed loops amplify), which
-    # deterministic replay relies on. DECISIONS D-11.
+    # deterministic replay relies on (docs/DESIGN.md D-11).
     force_destroy: true
   map:
     # MetaDrive PG block string: "S" = straight block, length drawn from the seed in [40, 80] m. 16 blocks
@@ -32,10 +33,10 @@ sim:
     # Ego vehicle: MetaDrive "static_default" = the default car body with FIXED dynamics (engine 800, brake 150,
     # friction 0.9, steering 40 deg). The stock "default" model resamples engine 750-850 / brake 80-180 every
     # episode (pilot round 1 trained on that); the M2/M3 controllers were tuned on static_default.
-    # Spawn: first block, random lane, fixed speed.
+    # Spawn: first block, fixed speed, lane spawn_lane (null = random every episode; 0 = next to the centre line).
     vehicle_model: static_default
     spawn_speed_km_h: 40
-    random_spawn_lane: true
+    spawn_lane: null
     max_steering_deg: 40      # default vehicle's max steering (used to convert steering commands to radians)
     max_speed_km_h: 80
     front_wheelbase: 1.05234
@@ -56,7 +57,7 @@ observation:
     frame_skip: 5
   ego_features: [v, d, psi_err, steering, throttle_brake]
 
-# Actuation mapping a [m/s^2] -> throttle_brake (used by M3's MPC; spec §19 "no sys-ID").
+# Actuation mapping a [m/s^2] <-> throttle_brake (M2 speed feed-forward, M3 MPC; no system identification).
 # Static lookup table measured once with scripts/calibrate_actuation.py (open-loop full/partial
 # throttle and brake on the bare map). Pairs are (throttle_brake, longitudinal accel m/s^2), sorted.
 actuation:
@@ -86,7 +87,6 @@ eval:
 
 training:
   total_control_steps: 2000000
-  max_wall_minutes: null       # optional wall-clock stop (training loop; the final eval still runs after it)
   progress_seconds: 60         # print a one-line status (time, steps/s, episodes, recent return/success/crash)
   n_envs: 4
   checkpoint_freq_control_steps: 100000
@@ -102,7 +102,7 @@ training:
 
 ppo:                           # SB3 PPO kwargs (defaults unless overridden in method/*.yaml)
   learning_rate: 0.0003
-  n_steps: 2048                # overridden per method (configs/method/*.yaml): 128 s of driving per env per rollout
+  n_steps: 2048                # overridden per method (configs/m1.yaml, m2.yaml, m3.yaml): 128 s of driving per env per rollout
   batch_size: 64
   n_epochs: 10
   clip_range: 0.2

@@ -26,33 +26,37 @@ Every shell: `unset PYTHONPATH` (ROS). Under WSL, `export GALLIUM_DRIVER=d3d12` 
 ## Commands
 ```bash
 python scripts/train.py --method m3 --seed 0 --set training.n_envs=8
-python scripts/evaluate.py --method m3 --checkpoint <run>/checkpoints/best.zip
+python scripts/evaluate.py --checkpoint <run>/checkpoints/best.zip --n-workers 4
 python scripts/evaluate.py --method b0
-python scripts/view.py live --method m3 --checkpoint <run>/checkpoints/best.zip     # needs a display
+python scripts/view.py live --checkpoint <run> --seeds 1003 1027              # needs a display
+python scripts/view.py replay --episode <run>/episodes/<id>.npz --checkpoint <run>/checkpoints/best.zip
 python scripts/plot.py curves runs/m*/r3_fast/seed_*/* --metric success
 
-python scripts/m3_harness.py edit --out configs/m3_harness/my_test.json   # M3 controller harness (hand-placed waypoints)
-scripts/run_all_m3.sh                                                      # run every harness scenario in turn
-python scripts/track_sine.py                                               # M2 PID tracking test
-python tests/benchmark_throughput.py --n-envs 1 4                          # steps/s per method
+python scripts/validate.py run configs/validation/overtake.json             # M3 on hand-placed waypoints + cars
+python scripts/validate.py edit --out configs/validation/my_test.json       # place waypoints / cars, then Run
+python scripts/validate.py check                                            # pass/fail suite (before a launch)
 ```
 Any config value can be overridden with `--set key.sub=value`.
 
 ## Layout
 ```
-configs/        base.yaml, scenario/freeway.yaml, method/{m1,m2,m3,b0}.yaml, reward/r3_fast.yaml, m3_harness/*.json
+configs/          base.yaml  freeway.yaml (scenario)  m1/m2/m3/b0.yaml (methods)  r3_fast.yaml (reward)
+                  validation/*.json (M3 scenarios: waypoints + cars)
 src/handoff/
-  config.py     config loading/merging + shared CLI arguments
-  simulator/    MetaDrive config, Frenet road frame, state extraction, viewer/overlays, plots
-  rl/env/       core.py (obs, reward, logging, one 0.1 s step), decision.py (decision loop),
-                factory.py (method -> env, per-method γ/λ), rewards.py (reward terms)
-  rl/methods/   b0_main.py, m1_main.py, m2_main.py -> m2_trajectory.py -> m2_pid.py,
-                m3_main.py -> m3_spline.py -> m3_corridor.py -> m3_mpc.py, common.py
-  rl/eval/      evaluation harness + episode metrics;  rl/records/  logs and run folders
-  rl/train.py, rl/callbacks.py   PPO entry point, eval/checkpoint/watchdog
-scripts/        train, evaluate, view, plot, m3_harness, track_sine, calibrate_actuation, matlab/
-slurm/          Great Lakes setup + job scripts
-tests/          benchmark_throughput.py, profile_timing.py (validation suite to be rebuilt)
-11_19_data/     pilot round 1 results
-runs/           outputs (git-ignored)
+  config.py       load + merge the YAML configs, shared CLI arguments
+  sim.py          MetaDrive setup, Frenet road frame, ego / car state, traffic speeds, actuation table
+  env.py          DrivingEnv: the one Gym env (decision loop, observation, reward, logging) + Method base class
+  reward.py       r3_fast reward terms
+  m1.py           M1 end-to-end, B0 IDM baseline
+  m2.py           M2: (d*, v*) -> quintic reference -> cascaded PID
+  m3.py           M3: waypoints -> spline -> road corridor -> e-brake gate -> MPC
+  mpc.py          the CasADi MPC and its fallbacks
+  reference.py    reference path type + quintic polynomial (shared by M2 and M3)
+  train.py        PPO training (callback, eval / checkpoint cadence, watchdog)
+  evaluate.py     evaluation on fixed seeds (parallel workers)
+  logs.py         run folders, per-episode recorder (.npz), episode metrics
+  viz.py          MetaDrive viewer + overlays, episode overview plots, learning curves
+scripts/          train, evaluate, view, plot, validate, calibrate_actuation, matlab/ (M2 PID tuner)
+slurm/            Great Lakes setup + job scripts
+runs/             outputs (git-ignored)
 ```

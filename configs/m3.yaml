@@ -1,0 +1,65 @@
+# M3: RL picks up to 5 waypoints + a speed v* every 1 s; spline -> road corridor -> MPC, with the emergency-brake
+# gate (src/handoff/m3.py, src/handoff/mpc.py).
+experiment:
+  method: m3
+
+method:
+  name: m3
+  decision_period: 10          # control steps per RL decision (1.0 s)
+  n_slots: 5                   # waypoint slots; the count channel picks how many are used (k = 1..5)
+  ds_range: [5.0, 40.0]        # per-slot spacing along the road (m)
+  lateral_margin: 1.0          # waypoint d range = [right edge - margin, left edge + margin]
+  speed_range_km_h: [20.0, 80.0]  # RL speed channel v*: spline speed, corridor ramp, MPC target AND hard speed
+                               # ceiling. Floor 20 km/h: slowing below that for traffic is the corridor / MPC's job.
+  spline:
+    ds: 1.0                    # path sample spacing (m)
+    extend: 80.0               # path continues flat beyond the last waypoint (m)
+  ebrake:
+    gate: true                 # emergency-brake (no MPC solve) when a car in the planned path (line ego -> next
+                               # waypoint crosses its keep-out zone) is closed on faster than gate_decel allows
+    gate_decel: 6.0            # m/s^2; fires when dv^2 / (2 gap) exceeds this (the MPC can plan down to -8)
+    ends_episode: true         # the gate, or an emergency brake after an INFEASIBLE MPC, ends the episode as
+                               # "emergency_brake" (collision penalty); solver timeouts never do
+  corridor:                    # road-aligned boxes on the ego centre, one per MPC stage, rebuilt every control step
+    inset: -0.3                # lateral faces = exterior lane centres pulled in by this (negative = wider): [-7.3, 0.3]
+    keepout_s: 1.0             # car keep-out zone: car + keepout_s fore / aft (m); also used by the gate
+    margin_d: 0.3              # ... + margin_d sideways (m)
+    accel: 2.0                 # stage-point speed ramp toward v* (m/s^2)
+    brake: 4.0                 # ... and down to v* (m/s^2)
+  mpc:
+    horizon: 50                # N stages (5.0 s at dt 0.1)
+    dt: 0.1
+    steer_lag: 0.1             # s, first-order wheel-angle lag in the model (measured)
+    weights:
+      lateral: 2.0
+      heading: 2.0
+      speed: 0.5
+      steer: 1.0
+      accel: 0.05
+      steer_rate: 20.0
+      accel_rate: 0.5
+      terminal_factor: 3.0
+      yaw_rate: 20.0           # ((psi_k - psi_k-1) / dt)^2, damps heading oscillation
+    barrier:                   # cost near the corridor's lateral faces (mpc.py, MPC._barrier)
+      weight: 1.0
+      dist: 0.5                # m from the face where the outer log barrier starts
+      inner_weight: 10.0
+      inner_dist: 0.25         # m from the face where the inner 1/gap^2 barrier starts
+    accel_bounds: [-8.0, 2.5]  # m/s^2 (-8 is about where MetaDrive braking stops being linear)
+    max_lat_accel: 4.0         # m/s^2, |v^2 tan(delta) / L| bound
+    steer_rate_limit: 0.6      # rad/s
+    ceiling_brake: 4.0         # m/s^2; the v* speed ceiling ramps down from the current speed at this rate
+    ebrake_steer: [1.0, 0.3, 0.06]   # emergency-brake steering gains: heading, heading-rate damping, lane pull
+    replay_steps:              # failed solve: replay the previous plan this many steps, then emergency brake
+      timeout: 5               # solver timeout / numerical failure (the brake after it never ends the episode)
+      infeasible: 0            # infeasible problem (0 = brake at once)
+    solver:
+      max_iter: 100
+      max_cpu_time: 0.1        # IPOPT limit in process CPU time (s); exceeding it = timeout. Slow but successful
+                               # solves are always used.
+      tol: 0.001
+      print_level: 0
+
+ppo:
+  n_steps: 128                 # decisions per env per rollout (= 128 s of driving, same as M1 / M2)
+  batch_size: 256

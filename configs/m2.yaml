@@ -1,0 +1,26 @@
+# M2: RL picks (d*, v*) every 0.5 s; quintic lateral + accel-limited speed profile; cascaded PID tracks it
+# (src/handoff/m2.py).
+experiment:
+  method: m2
+
+method:
+  name: m2
+  decision_period: 5           # N2 control steps (0.5 s)
+  lateral_margin: 1.0          # d* range = [d_min - margin, d_max + margin]  (NOT clipped)
+  trajectory:
+    horizon: 2.0               # T_traj (s)
+    dt: 0.1
+    accel_limit: 2.0           # speed-profile acceleration limit (m/s^2)
+    decel_limit: 4.0           # speed-profile deceleration limit (m/s^2)
+  pid:
+    # Tuned 2026-11-19 on the kinematic bicycle + 0.12 s steering lag (scripts/matlab/m2_pid_tuning.m).
+    # Was heading [1.7, 0.01, 3.5], lateral [0.3, 0.002, 0.05], speed [0.6, 0.02, 0.0] (MetaDrive LaneChangePolicy).
+    heading: [1.0, 0.005, 0.0]
+    lateral: [0.06, 0.0005, 0.0]
+    speed: [0.25, 0.0008, 0.0] # on (v_ref - v) in m/s -> throttle_brake
+    integral_limit: 5.0
+    speed_feedforward: true    # add a_ref -> throttle_brake feed-forward from the actuation table
+
+ppo:                           # round 2: more updates per control step (pilot: ~14 updates in 2M steps)
+  n_steps: 256                 # decisions per env per rollout (= 128 s of driving, same as M1/M3)
+  batch_size: 256

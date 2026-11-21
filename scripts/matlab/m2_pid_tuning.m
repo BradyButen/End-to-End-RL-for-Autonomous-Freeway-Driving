@@ -6,12 +6,12 @@
 %        Optional first-order steering lag tau (P.tau, adjustable in the tuner) adds a 5th state
 %        delta_act. Keep it on (0.12 s) when judging stability: the lag is small for trajectory
 %        prediction but large at feedback crossover frequencies.
-% Controller: M2's PID as implemented in src/handoff/rl/methods/m2_pid.py
+% Controller: M2's PID as implemented in src/handoff/m2.py
 %   u_s  = PID_psi(psi_ref - psi) + PID_d(d_ref - d)        reference at the ego's projection on the path
 %   u_tb = PID_v(v_ref(t+Ts) - v) + table^-1(a_ref(t+Ts))    reference by time (feed-forward optional)
 %   Discrete, per control step: I = running sum of errors (clamped to +-integral_limit),
 %   D = e_k - e_{k-1}. Gains are in command units (u_s, u_tb in [-1, 1]), i.e. the same numbers as
-%   configs/method/m2.yaml. "Print gains" writes a YAML block you can paste back.
+%   configs/m2.yaml. "Print gains" writes a YAML block you can paste back.
 %
 % Tabs in the tuner
 %   Lateral step   linear, straight driving at 10-40 m/s (P.lin_speeds): 1 m step in d_ref, u_s, loop Bode
@@ -50,7 +50,7 @@ P.g_brake    = 27.27;                 % small-signal accel per unit command, lig
 % (the current v_cap); speeds above it are extrapolation of the fitted model (fit covered 8-24 m/s).
 P.lin_speeds = [10 15 20 22.2 25 30 35 40];
 % Steering lag of the PLANT only (s): first-order lag from the commanded to the effective wheel angle,
-% measured in MetaDrive (yaw-rate time constant 0.11-0.12 s, DECISIONS D-12). 0 = pure kinematic plant.
+% measured in MetaDrive (yaw-rate time constant 0.11-0.12 s, docs/DESIGN.md D-12). 0 = pure kinematic plant.
 % It matters for feedback design: at 5-12 rad/s crossover it costs 30-55 deg of phase.
 P.tau = 0.12;
 

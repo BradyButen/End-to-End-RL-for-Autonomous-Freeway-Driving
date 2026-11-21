@@ -27,7 +27,7 @@ r0 (MetaDrive's default, used in the pilot) and the untuned example variants wer
 earned ~+1040 and a crash only −5, so crashing late was almost as good as finishing.
 
 ## 3. PPO settings and why
-Base (`configs/base.yaml`) unless a method overrides it (`configs/method/m*.yaml`).
+Base (`configs/base.yaml`) unless a method overrides it (`configs/m1.yaml`, `m2.yaml`, `m3.yaml`).
 
 | setting | value | why |
 |---|---|---|
@@ -49,7 +49,8 @@ Base (`configs/base.yaml`) unless a method overrides it (`configs/method/m*.yaml
 * `train.sbatch` sets `PYTHONUNBUFFERED=1` (live log) and `PYTHONFAULTHANDLER=1` (traceback on a segfault).
 * `checkpoints/vecnormalize_*.pkl` is saved with every checkpoint (needed only to resume; resume is not implemented).
 
-## 5. Pilot round 1 (2026-11-18/19, `11_19_data/`, reward r0, 2M control steps, seed 0)
+## 5. Pilot round 1 (2026-11-18/19, reward r0, 2M control steps, seed 0)
+Run folders were in `11_19_data/` (removed 2026-11-21; in git history at commit `62bc7b3`).
 | | M1 | M2 | M3 |
 |---|---|---|---|
 | final eval success / collision | 0 % / 85 % | 65 % / 35 % | 100 % / 0 % |
@@ -84,11 +85,13 @@ git clone https://github.com/BradyButen/learning-driving-control.git handoff && 
 PY_MODULE=python/3.12.1 bash slurm/setup_greatlakes.sh            # CUDA PyTorch (gpu partitions)
 PY_MODULE=python/3.12.1 CPU_ONLY=1 bash slurm/setup_greatlakes.sh # CPU-only PyTorch (standard partition)
 ```
-Measure throughput before setting budgets (M3 is heavier than in the pilot: horizon 50, corridor every step):
+Before launching, run the validation suite on a compute node, then read throughput off a short run: training prints
+a status line every `training.progress_seconds` (60 s) with control steps/s.
 ```bash
-srun --account=rob535_navarch565_f26_class --partition=standard --cpus-per-task=20 --time=00:30:00 --pty bash
+srun --account=rob535_navarch565_f26_class --partition=standard --cpus-per-task=20 --time=01:00:00 --pty bash
 source .venv/bin/activate && export SDL_VIDEODRIVER=dummy OMP_NUM_THREADS=1 && unset PYTHONPATH
-python tests/benchmark_throughput.py --n-envs 14 --decisions 300
+python scripts/validate.py check
+python scripts/train.py --method m3 --set training.n_envs=14 --set eval.n_workers=4 --set eval.freq_control_steps=0
 ```
 Budget for a 4–5 h run ≈ control steps/s × 4.5 h × 3600 × 0.8 (eval + PPO updates).
 
@@ -107,8 +110,8 @@ if far below 80 GB.
 Analysis:
 ```bash
 python scripts/plot.py curves runs/m*/r3_fast/seed_*/* --metric success --x control_steps --out curves.png
-python scripts/evaluate.py --method m3 --checkpoint <run>/checkpoints/best.zip
-python scripts/view.py live --method m3 --checkpoint <run>/checkpoints/best.zip --seeds 1017   # needs a display
+python scripts/evaluate.py --checkpoint <run>/checkpoints/best.zip --n-workers 4
+python scripts/view.py live --checkpoint <run>/checkpoints/best.zip --seeds 1017   # needs a display
 python scripts/view.py replay --episode <run>/episodes/<id>.npz --checkpoint <run>/checkpoints/best.zip
 ```
 Always `unset PYTHONPATH` (ROS) and `export SDL_VIDEODRIVER=dummy` on headless nodes.

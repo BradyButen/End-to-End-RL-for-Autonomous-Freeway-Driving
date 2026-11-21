@@ -1,0 +1,8 @@
+# B0: MetaDrive's stock IDMPolicy drives the ego at the 70 km/h target speed (car following + its own lane
+# changes). Evaluation only (src/handoff/m1.py).
+experiment:
+  method: b0
+
+method:
+  name: b0
+  decision_period: 1

@@ -1,14 +1,15 @@
 #!/usr/bin/env python
 """Analysis plots.
 
-    python scripts/plot.py curves runs/m1/r3_fast/seed_*/* runs/m3/r3_fast/seed_*/* --metric success --x control_steps
+    python scripts/plot.py curves runs/m*/r3_fast/seed_*/* --metric success --x control_steps --out curves.png
     python scripts/plot.py table runs/*/r3_fast/seed_*/*/final_eval/episodes.csv runs/eval/b0/episodes.csv
-    python scripts/plot.py episode runs/.../episodes/<id>.npz
+    python scripts/plot.py episode runs/.../episodes/<id>.npz      # <id>_overview.png + <id>_steps.csv
 """
 
 import argparse
+from pathlib import Path
 
-from handoff.simulator.plots import comparison_table, episode_timeseries, learning_curves
+from handoff.viz import comparison_table, episode_report, learning_curves
 
 
 def main():
@@ -21,10 +22,10 @@ def main():
     c.add_argument("--out", default="curves.png")
     t = sub.add_parser("table")
     t.add_argument("csvs", nargs="+")
-    t.add_argument("--out", default=None, help="optional .csv/.md output")
+    t.add_argument("--out", default=None, help="optional .csv / .md output")
     e = sub.add_parser("episode")
     e.add_argument("npz")
-    e.add_argument("--out", default="episode.png")
+    e.add_argument("--out", default=None, help="output folder (default: next to the .npz)")
     args = p.parse_args()
     if args.cmd == "curves":
         print(learning_curves(args.run_dirs, args.metric, args.x, args.out))
@@ -34,7 +35,7 @@ def main():
         if args.out:
             (tab.to_markdown if args.out.endswith(".md") else tab.to_csv)(args.out)
     else:
-        print(episode_timeseries(args.npz, args.out))
+        print(episode_report(args.npz, args.out or Path(args.npz).parent))
 
 
 if __name__ == "__main__":

@@ -1,28 +1,30 @@
-# R4 (2026-11-21, tuned by driving it: scripts/drive.py, scripts/validate.py run). Raw terms: src/handoff/reward.py.
+# R4 (2026-11-21, tuned by driving it: scripts/drive.py, scripts/validate.py run; weights raised 2026-11-22 for speed:
+# time x3, speed_gap x3, success x10, crash x2). Raw terms: src/handoff/reward.py.
 # Per control step (0.1 s), v_max = 80 km/h = 22.2 m/s:
 #   + 0.2 * progress (m)                                   ~ +200 for the ~1 km route, whatever the speed
-#   - 0.1 (time)                                           -1 /s
-#   - 2.0 * ((v - v_max) / v_max)^2  (speed_gap)           -5 /s at 40 km/h, -1.25 /s at 60, -0.31 /s at 70, 0 at 80
+#   - 0.3 (time)                                           -3 /s
+#   - 6.0 * ((v - v_max) / v_max)^2  (speed_gap)           -15 /s at 40 km/h, -3.75 /s at 60, -0.94 /s at 70, 0 at 80
 #   - 2.7 * (|heading error| - 0.5 deg)+ (rad)             weaving +-0.5 m in lane for 100 s ~ -110
 #   - 0.2 outside +-0.57 m of a lane centre (lane_keep)    riding a line -2 /s
 #   - 5 * (G - gap) / G  (proximity)                       car overlapping sideways within G bumper to bumper:
 #                                                          G = 5 m ahead (-30 /s at 2 m), 2 m behind; -50 /s at contact
 #   lane_change: weight 0 (logged only: the lane_changes metric)
-# Terminal terms are ADDED: success +50; collision / off-road / M3 failed run (emergency_brake, infeasible_plan) -2000.
+# Terminal terms are ADDED: success +500; collision / off-road / M3 gate stop (emergency_brake, gate off) -4000.
 #
 # One lane change (heading + lane_keep): ~ -5.5 at 20 m/s to -11 at 40 km/h; a pass (out and back) ~ -11 to -22.
-# Rough episode scores:
-#   finish at the 80 km/h cap (~45 s):            +200 - 45 + 50                    = ~ +205  (minus passes)
-#   finish at 70 km/h (~51 s):                    +200 - 51 + 50 - 16               = ~ +183
-#   finish stuck behind 40 km/h traffic (~90 s):  +200 - 90 + 50 - 450              = ~ -290
-#   timeout crawling at ~20 km/h (150 s):         +167 - 150 - 1688                 = ~ -1670
-#   crash / off-road / failed run late at speed:  +200 - 45 - 2000                  = ~ -1845
-#   crash / failed run early (e.g. undrivable waypoints on the first decision):     = ~ -2000
-#   standing still for 150 s:                        0 - 150 - 3000                 = ~ -3150
-# => stand still < crash ~ failed run < crawl to timeout < slow finish < fast finish.
-#   Known: standing still scores below a crash, and a crawl to the timeout is close to one; a policy that is stuck
-#   loses little by crashing / asking for undrivable waypoints. Restoring "a crash is always worst" needs
-#   speed_gap < ~0.55 at collision -2000 (standing still = -150 - 1500 * w).
+# Rough episode scores (logged eval episodes re-scored, 2026-11-22, in brackets):
+#   finish at the 80 km/h cap (~45 s):            +200 - 135 + 500                  = ~ +565
+#   finish at 70 km/h (~51 s):                    +200 - 153 - 48 + 500 - 16        = ~ +483  [>= 65 km/h: +401]
+#   finish stuck behind 40 km/h traffic (~90 s):  +200 - 270 - 1350 + 500           = ~ -920  [~43 km/h: -777]
+#   crash / off-road late at speed:               +200 - 135 - 4000                 = ~ -3935 [-4200]
+#   crash early:                                                                    = ~ -4000
+#   timeout crawling at ~20 km/h (150 s):         +167 - 450 - 5063                 = ~ -5350
+#   standing still for 150 s:                        0 - 450 - 9000                 = ~ -9450
+# => stand still < crawl to timeout < crash < slow finish < fast finish.
+#   Passing (fast finish vs. stuck behind traffic, ~ +1180) pays while its crash risk is below ~26 %
+#   (gain / (gain + loss), loss = stuck finish - mid-route crash); crash -2000 would allow ~46 %.
+#   Known: standing still / crawling to the timeout score below a crash, so a policy that cannot drive yet (early
+#   M1) loses less by crashing. If that shows up, charge a crash the speed penalty it skips instead of raising it.
 experiment:
   reward_variant: r4_straight
 
@@ -30,12 +32,12 @@ reward:
   name: r4_straight
   weights:                     # raw terms: src/handoff/reward.py
     progress: 0.2              # per m along the route
-    time: 0.1                  # raw term is -1 per control step
-    success: 50.0
-    collision: -2000.0         # also an M3 failed run (emergency_brake, infeasible_plan)
-    off_road: -2000.0
+    time: 0.3                  # raw term is -1 per control step
+    success: 500.0
+    collision: -4000.0         # also an M3 gate stop (emergency_brake; gate off by default)
+    off_road: -4000.0
     lane_change: 0.0           # off (still logged as the lane_changes metric)
     heading: 2.7               # per rad of heading error beyond 0.5 deg, per control step
-    speed_gap: 2.0             # x ((v - 80 km/h) / 80 km/h)^2 per control step (see "Known" above)
+    speed_gap: 6.0             # x ((v - 80 km/h) / 80 km/h)^2 per control step (see the scores above)
     lane_keep: 0.2             # per control step outside the in-lane zone (raw term is -1 there)
     proximity: 5.0             # per control step, x (G - gap) / G; G = 5 m to a car ahead, 2 m behind (reward.py)

@@ -541,7 +541,7 @@ def comparison_table(csv_files, metrics=None):
     """Mean +- std of final-evaluation metrics per (method, reward)."""
     import pandas as pd
 
-    metrics = metrics or ["success", "collision", "emergency_brake", "infeasible_plan", "off_road", "timeout",
+    metrics = metrics or ["success", "collision", "emergency_brake", "infeasible_count", "off_road", "timeout",
                           "time_to_complete",
                           "mean_speed", "min_gap", "min_ttc", "rms_long_jerk", "rms_lat_accel", "rms_steer_rate",
                           "tracking_error_rms", "solve_time_mean", "fallback_count", "lane_changes"]

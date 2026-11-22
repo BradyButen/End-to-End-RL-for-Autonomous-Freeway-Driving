@@ -20,10 +20,10 @@ method:
                                # than gate_decel allows. Off: braking for cars is the MPC's job (corridor front face,
                                # accel down to -8 m/s^2); the gate pre-empted it at 6 m/s^2 and ended runs it could save
     gate_decel: 6.0            # m/s^2; fires when dv^2 / (2 gap) exceeds this
-    ends_episode: true         # failed runs end the episode with the collision penalty: infeasible waypoints
-                               # (peak spline lateral accel > mpc.max_lat_accel) -> "infeasible_plan"; the gate (if on)
-                               # -> "emergency_brake". MPC solve failures never end it (mpc.py). false (validate.py
-                               # run): the car brakes instead and the run goes on
+    ends_episode: true         # the gate (if on) ends the episode as "emergency_brake" with the collision penalty;
+                               # false (validate.py run): the car brakes and the run goes on. Infeasible waypoints
+                               # (peak spline lateral accel > mpc.max_lat_accel) never end it (2026-11-22): logged
+                               # (infeasible_count) and flown as asked; MPC solve failures never end it (mpc.py)
   corridor:                    # road-aligned boxes on the ego centre, one per MPC stage, rebuilt every control step
     inset: -0.3                # lateral faces = exterior lane centres pulled in by this (negative = wider): [-7.3, 0.3]
     keepout_s: 1.0             # car keep-out zone: car + keepout_s fore / aft (m); also used by the gate

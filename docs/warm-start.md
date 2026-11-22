@@ -77,6 +77,12 @@ performance. Warm runs write to `runs/warm/<m>/…` to keep the two groups apart
 | M2 | ~10 % (keeps lane, speeds up, rear-ends) | uncertain: untrained M2 already finishes ~100 % at 40 km/h; the clone starts faster but crashier |
 | M3 | 100 % (987 m, return −205) | strongest case: PPO starts from a policy that finishes, and has to learn to go faster without crashing |
 
+**First Great Lakes batch (2026-11-21/22, old reward weights; details `docs/TRAINING.md` §8):** the mechanics worked
+(step 0 = clone, no drop at unfreezing, stable updates). M2 went from 22 % to 100 % success within 400k steps (from
+scratch it collapsed); M3 stayed at 100 %; both settled on following 40 km/h traffic and never passing. M1 reached
+25 % at ~74 km/h but never learned to brake. Next batch: faster reward weights and no `infeasible_plan` termination
+for M3; the same clones.
+
 What to watch in the logs: `warm start: actor from data/bc/<m>_clone.zip` at start-up; the step-0 eval
 (`eval_0000000000`) ≈ the clone; whether success / return hold up after `actor unfrozen` (a drop right after
 unfreezing = the critic warm-up was too short or the noise too large); and the comparison against the from-scratch

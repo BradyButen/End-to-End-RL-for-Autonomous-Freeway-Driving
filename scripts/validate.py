@@ -11,8 +11,9 @@
    Every decision (1 s) the next <= 5 placed waypoints more than ds_min ahead go into the RL action exactly as a
    policy would output them (re-spaced to ds in [5, 40] m, d clipped to the action range), with v* = the scenario's
    target speed. The run ends on a crash / off-road, when the ego has stood still for 3 s, or 30 m past the last
-   waypoint. An emergency brake does not end the run here (method.ebrake.ends_episode=false) so you see the stop;
-   --set method.ebrake.ends_episode=true scores it as the RL would (episode ends, collision -500).
+   waypoint. A gate emergency brake (method.ebrake.gate, off by default) does not end the run here
+   (method.ebrake.ends_episode=false) so you see the stop; --set method.ebrake.ends_episode=true scores it as the RL
+   would (episode ends, collision penalty).
    The reward the RL would get (configs/r4_straight.yaml by default) is shown live: return so far and each term.
    Writes runs/validation/<scenario>/<timestamp>/: episodes/<id>.npz, <id>_overview.png, <id>_reward.png
    (cumulative return and each term over time), <id>_steps.csv, result.json.
@@ -37,9 +38,10 @@
    env        ego dynamics pinned, spawn speed / lane, RoadFrame vs MetaDrive, forced off-road ends the episode,
               determinism (same seed + actions -> identical trajectory; replay relies on it)
    m2         PID: lane 1 -> 0 -> 2 -> 1 with speed changes, scripted (d*, v*); cross-track / speed tolerances
-   m3         passes a 35 km/h lead; stops for a stopped car in its lane; undrivable waypoints end the run as
-              infeasible_plan; a solver that keeps failing replays its plan, then holds speed and lane (never
-              brakes or ends the run) and recovers once the solver works
+   m3         passes a 35 km/h lead; stops for a stopped car in its lane; undrivable waypoints (lane change
+              5 m ahead) are flagged but flown: the run goes on and the car reaches the lane; a solver that
+              keeps failing replays its plan, then holds speed and lane (never brakes or ends the run) and
+              recovers once the solver works
    smoke      M1 / M2 / M3 complete random-action episodes; logs consistent (terms, returns, decision counts)
    b0         B0 completes every evaluation seed through the evaluator
    train      PPO entry point end to end for a few hundred control steps per method (plumbing, not learning)
@@ -514,15 +516,25 @@ def m3_stopped_car() -> dict:
 
 def m3_infeasible_plan() -> dict:
     out = {}
-    # (c) undrivable waypoints (a full lane change 5 m ahead at 60 km/h): the run ends at once as infeasible_plan
+    # (c) undrivable waypoints (a full lane change 5 m ahead at 60 km/h, asked every decision): flagged infeasible but
+    #     flown as asked; the MPC (|lateral accel| <= max_lat_accel) makes the lane change as fast as it can, the run
+    #     goes on and the car ends up in the target lane, on the road
     env = controlled_env("m3", ego_lane=1, ego_kmh=60.0, label="m3 (c) infeasible_plan: lane change 5 m ahead")
     env.reset(options={"episode_seed": 0})
     L = env.road.lane_centers
-    _, r, te, tr, info = env.step(env.method.encode([5.0], [L[0]], kmh(60)))
-    out["infeasible_plan"] = {"termination": info.get("termination"), "control_steps": info["decision_control_steps"],
-                              "plan_lat_accel": env.decision["lat_accel"], "reward": r}
-    out["infeasible_plan"]["ok"] = bool(info.get("termination") == "infeasible_plan"
-                                        and info["decision_control_steps"] == 1)
+    reason, flags, peak = None, [], 0.0
+    for _ in range(8):
+        _, _, te, tr, info = env.step(env.method.encode([5.0], [L[0]], kmh(60)))
+        flags.append(not env.decision["feasible"])
+        peak = max(peak, env.decision["lat_accel"])
+        if te or tr:
+            reason = info["termination"]
+            break
+    st = env.recorder.steps
+    out["infeasible_plan"] = {"termination": reason, "infeasible_decisions": int(sum(flags)),
+                              "first_plan_lat_accel": peak, "final_d": env.ego.d, "target_d": float(L[0]),
+                              "fallbacks": int(np.sum(st["fallback"]))}
+    out["infeasible_plan"]["ok"] = bool(reason is None and flags[0] and abs(env.ego.d - L[0]) < 0.5)
     env.close()
     return out
 

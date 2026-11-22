@@ -84,10 +84,29 @@ Consequence: putting waypoints *closer* makes plans *less* feasible (allowed |Δ
 slope through the waypoints, checked on its actual curvature (v²·d″), would let dense waypoints follow a path
 closely. Deferred.
 
+## 8. Don't end the episode for asking: the infeasible-plan termination (2026-11-22)
+
+A plan whose spline needed more than `max_lat_accel` ended the episode as `infeasible_plan`, charged as a crash
+(−2000). In the warm-start run it was **every** M3 training failure (101 of 2817 episodes, 3.6 %) and never happened
+in eval. Logs + an offline Monte Carlo (eval decisions + the training noise, 20 draws each) showed why:
+
+* the check is purely kinematic (|Δd|, Δs, v): it never looked at cars or road edges; no failing plan had a waypoint
+  off the road;
+* the training noise (std 0.13 in action space) is **0.8 m per waypoint** laterally and 2.3 m in spacing;
+* the failing segments were a ~3.6 m (one-lane) move over ~20 m at ~53 km/h — lane changes 10–15 % over the limit —
+  or noise zigzags; the Monte Carlo reproduced the rate (0.04 % of decisions ≈ 3 % of episodes).
+
+So sideways exploration, the thing passing needs, was what got punished, and M3 settled on following traffic. Now the
+plan is flown as asked: the MPC enforces the same limit on the car and rounds the corner; consequences are judged by
+what happens (tracking, heading, collision), and the plan is counted (`infeasible_count`). Projecting the plan onto
+the feasible set (as `build_demos.py` does for the human labels) was the alternative, set aside: it changes the
+action between the policy and the controller. Lesson: a terminal penalty for *requesting* something hard is a
+penalty on exploration; let the layer that enforces the limit handle it and penalise outcomes.
+
 ## Validation that covers these
 
 ```bash
-python scripts/validate.py check m3          # pass_lead, stopped_car, infeasible_plan, failed_solve
+python scripts/validate.py check m3          # pass_lead, stopped_car, infeasible_plan (flown, not ended), failed_solve
 python scripts/validate.py check scenarios   # blocked, overtake, weaving, ... (configs/validation/*.json)
 python scripts/demo_relabel.py --methods m3  # human route through M3 (3D; white balls = waypoints)
 ```

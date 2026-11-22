@@ -76,15 +76,16 @@ k = 1–5 waypoints. Pipeline (also driven by `scripts/validate.py` with hand-pl
    (up to 10 steps = 1 s, `mpc.replay_steps`), then hold speed and lane until a solve succeeds. Never brakes, never ends
    the episode.
 
-**Failed runs** (`method.ebrake.ends_episode`, 2026-11-21): the RL is charged for plans the controller cannot carry
-out, instead of the car stopping dead on the freeway. All end the episode with the collision penalty:
-* `infeasible_plan` — checked once per decision: a waypoint segment of the spline needs more peak lateral
-  acceleration (5.77·|Δd|·v²/Δs², at the speed reachable by that segment braking at 4 m/s², floored at
-  min(v, v\*)) than the MPC's `max_lat_accel` (9.3 m/s², the human demos' peak; was 4). Ends on the decision's first control step.
-* `emergency_brake` — the gate fires (only with `ebrake.gate: true`; off by default).
+**Infeasible plans** (checked once per decision, logged only since 2026-11-22): a waypoint segment of the spline
+needs more peak lateral acceleration (5.77·|Δd|·v²/Δs², at the speed reachable by that segment braking at 4 m/s²,
+floored at min(v, v\*)) than the MPC's `max_lat_accel` (9.3 m/s², the human demos' peak). The plan is flown as asked;
+the MPC, which enforces the same limit on the car, rounds the corner. Counted per episode as `infeasible_count`.
+Until 2026-11-22 such a plan ended the episode as `infeasible_plan` with the collision penalty; in the warm-start
+run that was every M3 training failure (101 of 2817 episodes), all from exploration noise (0.8 m per waypoint)
+turning lane changes ~10 % over the limit, which taught M3 not to move sideways (`docs/m3-mpc-lessons.md` §8).
 
-Only M3 has these; report them next to collisions (predicted crashes / undrivable plans). In
-`scripts/validate.py run` (ends_episode false) none of them end the run: the car brakes and you see it.
+**Failed runs** (`method.ebrake.ends_episode`): only the gate (`ebrake.gate`, off by default) ends an episode, as
+`emergency_brake` with the collision penalty. In `scripts/validate.py run` (ends_episode false) it brakes instead.
 
 ## 5. Logging (`logs.py`, `evaluate.py`)
 Every episode → one row in `episodes.csv` (termination, return and per-term returns, speed, jerk, gaps, solver

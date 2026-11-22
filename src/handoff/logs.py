@@ -24,21 +24,21 @@ from handoff.config import REPO_ROOT, save_config
 from handoff.reward import TERMS, crashed
 from handoff.sim import EGO_FIELDS, OBJECT_FIELDS, EgoState, pack_objects
 
+# infeasible_plan: M3 runs before 2026-11-22 ended on undrivable waypoints; kept as a (now always 0) column so old and
+# new episodes.csv compare. New runs count those plans in infeasible_count instead (they no longer end the episode).
 TERMINATIONS = ("success", "collision", "emergency_brake", "infeasible_plan", "off_road", "timeout", "other")
 STEP_SCALARS = ("reward", "tracking_error", "solve_time", "cpu_time", "fallback", "gated_brake", "min_gap",
                 "min_ttc", "ref_d", "ref_v", "ref_psi", "cmd_steering", "cmd_throttle", "decision_index")
 
 
 def termination_reason(info: dict, truncated: bool) -> str:
-    """Priority: success > collision > emergency_brake (M3) > infeasible_plan (M3) > off_road > timeout."""
+    """Priority: success > collision > emergency_brake (M3) > off_road > timeout."""
     if info.get("arrive_dest"):
         return "success"
     if crashed(info):
         return "collision"
     if info.get("emergency_brake"):
         return "emergency_brake"
-    if info.get("infeasible_plan"):
-        return "infeasible_plan"
     if info.get("out_of_road"):
         return "off_road"
     if truncated or info.get("max_step"):
@@ -65,7 +65,7 @@ class EpisodeRecorder:
         self.status: list[str] = []
         self.objects, self.object_ids, self.pred_paths = [], [], []
         self.tube_steps, self.tubes, self.tube_trajs = [], [], []
-        self.dec: dict[str, list] = {"k": [], "control_steps": [], "reward": [], "start_step": []}
+        self.dec: dict[str, list] = {"k": [], "control_steps": [], "reward": [], "start_step": [], "infeasible": []}
         self.dec_full: dict[str, list] = {"raw_action": [], "decoded": [], "waypoints": []}
         self.references: list[np.ndarray] = []
 
@@ -96,6 +96,7 @@ class EpisodeRecorder:
         self.dec["control_steps"].append(n_steps)
         self.dec["reward"].append(reward)
         self.dec["start_step"].append(start_step)
+        self.dec["infeasible"].append(int(not decision.get("feasible", True)))   # M3: plan over max_lat_accel
         if self.full:
             self.dec_full["raw_action"].append(np.asarray(raw_action, np.float32).ravel())
             self.dec_full["decoded"].append(np.asarray(decision.get("vector", []), np.float32).ravel())
@@ -219,6 +220,7 @@ def episode_metrics(steps: dict, decisions: dict, reason: str, dt: float, max_st
     ks = np.asarray(decisions["k"], int)
     for k in range(1, 6):
         out[f"k{k}_count"] = int(np.sum(ks == k))
+    out["infeasible_count"] = int(np.sum(np.asarray(decisions.get("infeasible", []), int)))   # M3 decisions
     return out
 
 

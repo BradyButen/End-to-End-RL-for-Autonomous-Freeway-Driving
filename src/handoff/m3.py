@@ -4,8 +4,9 @@ pipeline below turns them into controls.
     action [-1, 1]^12 = [ds_1, d_1, ..., ds_5, d_5, v*, count]
       decode   k = 1..5 waypoints (s, d): ds in [5, 40] m per slot (cumulative from the ego), d in
                [right edge - 1 m, left edge + 1 m]; v* in [20, 80] km/h                          (per decision)
-      check    the waypoints must be drivable: each spline segment's peak lateral acceleration
-               (5.77 |dd| v^2 / ds^2) within the MPC's max_lat_accel, else the plan is infeasible  (per decision)
+      check    each spline segment's peak lateral acceleration (5.77 |dd| v^2 / ds^2) vs. the MPC's max_lat_accel;
+               over it = "infeasible": logged only (decision["feasible"], episode infeasible_count), the plan is
+               flown as asked and the MPC (which enforces the limit itself) rounds the corner  (per decision)
       spline   piecewise quintic in s through the waypoints, flat 80 m beyond the last, speed v* (per decision)
       gate     (ebrake.gate, OFF by default) a car in the planned path (the line ego -> next waypoint crosses its
                keep-out zone) closed on faster than gate_decel allows -> emergency brake, no MPC solve
@@ -14,12 +15,10 @@ pipeline below turns them into controls.
       MPC      mpc.py: tracks the trajectory inside the corridor (soft constraints: exact penalty, so the corridor
                holds whenever it can); v* is also its speed ceiling. Braking for cars is the MPC's job.
 
-Failed runs (ebrake.ends_episode), with the collision penalty: the RL is charged for plans the controller cannot
-carry out.
-  * infeasible waypoints -> the episode ends at once as "infeasible_plan";
-  * the gate fires (only with ebrake.gate on) -> "emergency_brake".
-MPC solve failures never end the episode: the previous plan is replayed, then the car holds speed and lane until
-a solve succeeds (mpc.py). With ends_episode false (scripts/validate.py run) nothing ends the run.
+Failed runs (ebrake.ends_episode): only the gate (ebrake.gate, off) ends the episode, as "emergency_brake" with the
+collision penalty. Infeasible waypoints no longer end it (2026-11-22: ending them charged -2000 for noise-perturbed
+lane changes ~10 % over the limit, and taught M3 not to move sideways). MPC solve failures never end the episode:
+the previous plan is replayed, then the car holds speed and lane until a solve succeeds (mpc.py).
 """
 
 from __future__ import annotations
@@ -319,13 +318,7 @@ class M3(Method):
     def control(self):
         env = self.env
         ego, objects, road = env.ego, env.objects, env.road
-        infeasible = self.lat_accel > self.lat_accel_limit
-        if infeasible and self.ebrake_ends:     # the RL asked for the undrivable: end the run now (failed run)
-            self.tube = None
-            r = self.reference.at_s(ego.s)
-            return self.mpc.brake(ego), {"status": f"infeasible_plan:{self.lat_accel:.1f}m/s2", "ref_v": ego.v,
-                                         "infeasible_terminal": True, "tracking_error": abs(r["d"] - ego.d),
-                                         "ref_d": r["d"], "ref_psi": r["psi"]}
+        infeasible = self.lat_accel > self.lat_accel_limit    # logged only: the MPC flies what it can of it
         blocker = None
         if self.gate:
             blocker = path_blocked(ego, self.waypoints, objects, road, self.corridor.keepout_s, self.corridor.margin_d,

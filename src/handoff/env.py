@@ -226,9 +226,6 @@ class DrivingEnv(gym.Env):
         if diag.get("ebrake_terminal"):          # M3: emergency brake ends the run, scored as a collision
             info["emergency_brake"] = True
             terminated = True
-        if diag.get("infeasible_terminal"):      # M3: undrivable waypoints end the run, scored as a collision
-            info["infeasible_plan"] = True
-            terminated = True
         self.episode_control_steps += 1
         self.total_control_steps += 1
         self.ego = extract_ego(self.md, self.road, self.episode_control_steps * self.dt)

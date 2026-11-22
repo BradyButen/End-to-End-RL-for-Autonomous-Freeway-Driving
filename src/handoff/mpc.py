@@ -30,7 +30,7 @@ corridor the problem is essentially always feasible; what remains is timeouts / 
     that holds the road heading and pulls to the nearest lane centre, until a solve succeeds again. Never ends the
     episode and never brakes (no emergency brake in the MPC).
 Emergency brake (``brake``): full brake with the same steering law. Only M3's gate uses it (ebrake.gate, off by
-default) and the last step of an infeasible_plan episode.
+default).
 """
 
 from __future__ import annotations

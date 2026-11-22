@@ -5,7 +5,6 @@ as M2 and as M3 would fly it, from the labels scripts/build_demos.py makes for t
     python scripts/demo_relabel.py                                   # seed 428 demo: human, M2, M3 (3D window)
     python scripts/demo_relabel.py data/human_demos/drive_eval_r0_e000000_s11.npz --fps 0
     python scripts/demo_relabel.py --methods m3 --no-human --no-render              # plot + numbers only
-    python scripts/demo_relabel.py --set method.ebrake.ends_episode=false           # M3 brakes instead of ending
 
 1. human: the logged [steering, throttle_brake] replayed on the same seed (exactly the recorded drive).
 2. M2 / M3: at every decision the label is looked up at the point of the human's path nearest the car (by distance

@@ -56,7 +56,7 @@ def main():
     CsvAppender(out / "episodes.csv").write(summaries)
     agg = aggregate(summaries)
     (out / "summary.json").write_text(json.dumps(agg, indent=2))
-    for k in ("success", "collision", "emergency_brake", "infeasible_plan", "off_road", "timeout", "mean_speed",
+    for k in ("success", "collision", "emergency_brake", "infeasible_count", "off_road", "timeout", "mean_speed",
               "time_to_complete",
               "min_gap", "min_ttc", "rms_long_jerk", "solve_time_mean", "solve_time_p95", "fallback_count", "return"):
         if k in agg:

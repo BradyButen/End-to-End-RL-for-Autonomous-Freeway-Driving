@@ -27,7 +27,7 @@ Labels (docs/human-data-pipeline.md, "Converting human drives into M2 / M3 actio
       human's highest speed over the next --m3-speed-ahead-s (3 s). v* is M3's speed target AND hard ceiling: the
       mean over the whole ~8 s waypoint stretch slowed it ~175 m before the human; the next-second speed capped it
       at the human's speed, so it could never catch up after falling behind. Plans whose peak lateral acceleration
-      exceeds mpc.max_lat_accel (the check that would end the episode as infeasible_plan) are, with --m3-infeasible:
+      exceeds mpc.max_lat_accel (M3's feasibility check; logged, no longer ends the episode) are, with --m3-infeasible:
         smooth (default)  rate-limited: each waypoint moves at most the feasible |dd| from the previous one (the
                           lateral move is spread over more distance, same direction / target lane), then re-checked
         drop              left out. ~50 % of the human plans fail the check: every plan whose 100-180 m lookahead

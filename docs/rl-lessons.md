@@ -41,7 +41,8 @@ learning starts.
 A policy that cannot steer yet cannot finish, so among what it *can* reach, crawling beats crashing — "slow down and
 survive" is the correct first lesson, and both M1 (laptop) and M3 (round 3, ~25 km/h) learned it. M3 additionally
 paid ~−1250 per episode in the speed term for it. Lesson: before training, list what an untrained policy can reach
-and how the reward ranks those outcomes — that is where it will go first.
+and how the reward ranks those outcomes — that is where it will go first. (Those are the 2026-11-21 weights; the
+2026-11-22 weights rank stand still −9450 < crawl to timeout −5350 < crash −4000 < slow finish < fast finish, §10.)
 
 ## 6. Memory that grows with episodes: MetaDrive's map cache
 
@@ -67,6 +68,10 @@ Lesson: cloning works when the controller under the policy supplies the safety-c
 policy itself must learn when to brake or change lanes from a few thousand camera frames (M1, M2), the clone mostly
 provides speed and road-following, and corrective data (DAgger) is the next step.
 
+Great Lakes batch (`docs/TRAINING.md` §8) confirmed it: warm M2 went 22 % → 100 % (from scratch it collapsed), warm M3
+held 100 %, warm M1 reached 25 % but never brakes. And a new lesson: a warm start with low noise converges to the
+*nearest safe* behaviour — M2 and M3 both settled on following 40 km/h traffic and never discovered passing.
+
 ## 8. Labels must be in the controller's frame
 
 Two cases where the human labels were "correct" but meant something different to the controller:
@@ -80,7 +85,33 @@ And one where a better-fitting representation was rejected: M2 with a 1.5 s hori
 (0.09 m) but failed the step-response check (one-lane step ≈ 9 m/s², at grip). A representation has to fit the data
 **and** survive the actions the learner will try.
 
-## 9. Operations (Great Lakes)
+## 9. Penalise outcomes, not requests
+
+M3's `infeasible_plan` ended the episode at −2000 when a plan asked for more lateral acceleration than the limit.
+Exploration noise (0.8 m per waypoint) made lane changes cross that line ~3 % of episodes, so every sideways try was
+a lottery ticket for a crash penalty, and the warm-started M3 learned to follow traffic instead of passing. Removed
+2026-11-22: the plan is flown (the MPC enforces the limit) and counted. Lesson: a terminal penalty on what the agent
+*asks for* is a penalty on exploring near the limit; let the controller enforce limits and let the reward judge what
+actually happens (`docs/m3-mpc-lessons.md` §8).
+
+## 10. Reward weights: ratios decide, not magnitudes
+
+For "drive as fast as possible without crashing" (2026-11-22), re-scoring the logged episodes under candidate weights
+(each episode's raw term sums are in `episodes.csv`, so any weight set can be re-scored without training) showed:
+* **Scaling every term together changes nothing.** Reward normalisation divides out a common scale, and the decision
+  that matters — try a pass or stay behind? — depends on gain / (gain + loss): gain = fast finish − stuck finish, loss
+  = stuck finish − crash. That ratio is the crash risk at which passing starts to pay. Old weights: 16 %. Speed ×3 and
+  crash ×3 together: still ~17 %.
+* **The crash penalty is the speed-vs-safety dial.** Speed terms ×3 with crash kept at −2000 → 46 % (accepts
+  near coin-flip passes); crash −4000 → ~26 % (chosen); −6000 → 18 %.
+* **A big success bonus barely reaches the policy.** The discount looks ~10 s ahead (`gamma_ref` 0.99 per 0.1 s);
+  a bonus at the end of a 45–90 s episode is ~1 % of its value at the start. Per-step terms (speed, time) are what
+  it feels.
+* **Raising the per-second cost of slowness makes crashing relatively cheap** for a policy that cannot drive yet:
+  crawling (−5350) and standing still (−9450) now score below a crash (−4000). Fine for M2 / M3 (they never stand
+  still); watch early M1. Fix if needed: charge a crash the speed penalty it skips, rather than a bigger constant.
+
+## 11. Operations (Great Lakes)
 
 * The class account runs **2 jobs at a time** (`AssocMaxJobsLimit`), in submission order — list the jobs you care
   about first.

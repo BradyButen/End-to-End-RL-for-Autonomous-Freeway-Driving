@@ -34,7 +34,7 @@ from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNorm
 from handoff.evaluate import ParallelEvaluator, aggregate, policy_spec  # noqa: E402
 from handoff.logs import CsvAppender, make_run_dir  # noqa: E402
 
-EVAL_LOG_METRICS = ("success", "collision", "emergency_brake", "infeasible_plan", "off_road", "timeout", "return",
+EVAL_LOG_METRICS = ("success", "collision", "emergency_brake", "infeasible_count", "off_road", "timeout", "return",
                     "mean_speed",
                     "min_gap", "min_ttc", "rms_long_jerk", "rms_lat_accel", "rms_steer_rate", "tracking_error_rms",
                     "solve_time_mean", "solve_time_p95", "fallback_count", "gated_brake_count", "lane_changes",
@@ -246,7 +246,8 @@ class TrainingCallback(BaseCallback):
                 self.recent = (self.recent + [summ])[-100:]
         self.episodes_csv.write(rows)
         if rows:
-            for k in ("success", "collision", "emergency_brake", "infeasible_plan", "off_road", "return", "mean_speed"):
+            for k in ("success", "collision", "emergency_brake", "infeasible_count", "off_road", "return",
+                      "mean_speed"):
                 self.logger.record(f"train/{k}", float(np.mean([r[k] for r in self.recent])))
         self.logger.record("counters/control_steps", self.control_steps)
         self.logger.record("counters/decisions", self.decisions)
@@ -283,7 +284,7 @@ class TrainingCallback(BaseCallback):
                f"{self.episodes} ep | {self.rollouts} rollouts | mem {_rss_gb():.1f} GB")
         recent = self.recent[-50:]
         if recent:
-            crash = np.mean([max(r["collision"], r["emergency_brake"], r["infeasible_plan"], r["off_road"])
+            crash = np.mean([max(r["collision"], r["emergency_brake"], r["off_road"])
                              for r in recent])
             msg += (f" | last {len(recent)} ep: return {np.mean([r['return'] for r in recent]):7.1f}, "
                     f"success {np.mean([r['success'] for r in recent]):.2f}, crash {crash:.2f}, "

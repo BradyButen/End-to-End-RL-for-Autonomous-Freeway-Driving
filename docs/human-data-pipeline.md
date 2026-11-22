@@ -7,7 +7,7 @@ learning curves and final eval metrics.
 
 Branch: `human-demos` (from Brady's `New_RL_Formulations`, with `main` merged in). Owner: Kevin.
 
-## Status (2026-11-21)
+## Status (2026-11-22)
 
 | step | what | status |
 |---|---|---|
@@ -18,8 +18,8 @@ Branch: `human-demos` (from Brady's `New_RL_Formulations`, with `main` merged in
 | 2c | make the clone drive: corrective data (DAgger / targeted drives) | ⏳ next, or skip to step 3 |
 | 3 | PPO warm start option in `scripts/train.py` | ✅ done, tested locally (off by default) |
 | 3b | 1 h laptop pilot of the warm start (`scripts/laptop_warm_trial.sh`) | ✅ first positive M1 returns, see below |
-| 4 | from-scratch vs warm-start runs on Great Lakes (`slurm/launch_batch.sh`) | ⏳ launching |
-| 5 | M2 / M3 clones: the same drives relabelled in their actions (`build_demos.py --method m2/m3`) | ✅ code ready, offline-checked; clones to build (`METHOD=m3 CLONE_ONLY=1 scripts/laptop_warm_trial.sh`) |
+| 4 | from-scratch vs warm-start runs on Great Lakes (`slurm/launch_batch.sh`) | ✅ first warm batch done (`docs/TRAINING.md` §8); batch 2 with new reward weights next |
+| 5 | M2 / M3 clones: the same drives relabelled in their actions (`build_demos.py --method m2/m3`) | ✅ built (`data/bc/m2_clone.zip`, `m3_clone.zip`), used in the warm batch |
 
 **M1's action changed (2026-11-21)** from raw `throttle_brake` to a target acceleration (`method.accel_range`
 [−4, 2.9] m/s², 0 = hold speed; `src/handoff/m1.py`): raw throttle_brake is ~5× stronger on the brake side, so
@@ -273,7 +273,9 @@ human and sideswiped the cars the human had waited for (sim: 1 of 8 drives succe
   speed target AND hard ceiling: the mean over the whole ~8 s waypoint stretch made M3 slow ~175 m before the human;
   the next-second speed capped it at the human's speed, so it could never catch up after falling behind.
 
-**Feasibility.** M3 ends an episode as `infeasible_plan` when a plan's peak lateral acceleration exceeds 4 m/s²
+**Feasibility.** (Written when M3 ended an episode as `infeasible_plan` on a plan over the limit, then 4 m/s²; since
+2026-11-22 such plans are flown and only counted, limit 9.3 m/s². The labels are still smoothed: they are what the
+clone learns to ask for.) A plan is infeasible when its peak lateral acceleration exceeds the limit
 (`m3.plan_lat_accel`: a quintic per segment, flat at every waypoint, so 5.77·|Δd|·v²/Δs²). Keyboard lane changes take
 ~40 m at 77 km/h, and every plan whose lookahead contains one fails: **47–54 % of the human plans** at any spacing.
 Dropping them (`--m3-infeasible drop`) would remove every lane change from the data. Default

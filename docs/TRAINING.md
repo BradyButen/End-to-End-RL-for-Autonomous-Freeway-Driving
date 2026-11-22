@@ -16,21 +16,22 @@ weights and the full arithmetic: `configs/r4_straight.yaml`. Tuned 2026-11-21 by
 | term | weight | why |
 |---|---|---|
 | progress (Δs, m) | +0.2 /m | dense signal: tells an untrained policy which way is good (~+200 for a full route, whatever the speed) |
-| time | −0.1 /step (−1 /s) | arriving sooner is directly better |
-| success | +50 | finishing beats every non-finish at a reasonable speed |
-| collision | −2000 | also charged for an M3 failed run (`emergency_brake`, `infeasible_plan`) |
-| off_road | −2000 | |
-| speed_gap | −2.0 × ((v − 80 km/h)/80 km/h)² per step | pushes toward the cap, quadratically: −5/s at 40 km/h, −1.25/s at 60, −0.31/s at 70 |
+| time | −0.3 /step (−3 /s) | arriving sooner is directly better |
+| success | +500 | finishing beats every non-finish; mostly felt near the end (the ~10 s discount horizon) |
+| collision | −4000 | also charged for an M3 gate stop (`emergency_brake`, gate off by default). Until 2026-11-22 also M3 `infeasible_plan` (no longer a termination) |
+| off_road | −4000 | sets the speed-vs-safety trade-off: a pass pays while its crash risk is below ~26 % (−2000 would allow ~46 %) |
+| speed_gap | −6.0 × ((v − 80 km/h)/80 km/h)² per step | pushes toward the cap, quadratically: −15/s at 40 km/h, −3.75/s at 60, −0.94/s at 70 |
 | heading | −2.7 per rad of heading error beyond 0.5°, per step | damps oscillation (weaving ±0.5 m for 100 s ≈ −110); summed over a lane change ≈ lateral distance / speed (−4.0 to −7.9) |
 | lane_keep | −0.2 per step outside ±0.57 m of a lane centre (body ~25 cm inside the lines) | no riding the lines (−2/s); 0 inside the lane rather than an in-lane bonus, which would cancel the time cost |
 | proximity | −5 × (G − gap)/G per step for a car overlapping sideways; G = 5 m to a car ahead, 2 m to a car behind | steep near-miss shaping before the crash (−30/s at 2 m behind a car, −50/s at contact); cars beside the ego never count |
 | lane_change | 0 (logged only) | the `lane_changes` metric; passes are paid for by heading + lane_keep (≈ −5.5 to −11 per lane change) |
 
-Expected episode scores: fast finish at 80 km/h ≈ +205 > finish at 70 km/h ≈ +183 > finish behind 40 km/h traffic
-≈ −290 > crawl to the timeout at 20 km/h ≈ −1670 > crash / failed run ≈ −1845 (late) to −2000 (early) > standing
-still for 150 s ≈ −3150. Known: standing still scores below a crash, and crawling is close to one, so a stuck policy
-loses little by crashing or by asking for undrivable waypoints (M3); "a crash is always worst" needs speed_gap
-< ~0.55 at collision −2000. Full arithmetic: `configs/r4_straight.yaml`.
+Weights raised 2026-11-22 to push for speed (time, speed_gap ×3, success ×10, crash ×2). Expected episode scores:
+fast finish at 80 km/h ≈ +565 > finish at 70 km/h ≈ +483 > finish behind 40 km/h traffic ≈ −920 > crash ≈ −3935
+(late) to −4000 (early) > crawl to the timeout at 20 km/h ≈ −5350 > standing still for 150 s ≈ −9450. Known:
+crawling and standing still score below a crash, so a policy that cannot drive yet (early M1) loses less by
+crashing; if that shows up, charge a crash the speed penalty it skips. Earlier runs (round 3, first warm batch) used
+time 0.1, speed_gap 2, success 50, crash −2000: compare returns only within one weight set. Full arithmetic: `configs/r4_straight.yaml`.
 History: r0 (MetaDrive's default, pilot round 1: a finish earned ~+1040 and a crash only −5) and r3_fast (round 2:
 progress 0.1, time, terminals ±50 / −500, lane_change −2) were removed; their weights are in each run's config.yaml.
 
@@ -80,10 +81,9 @@ What it showed (and what changed because of it):
 * No episode crashed in its first 3 s (spawns are clean).
 
 ## 6. Known risks for round 2
-* **M3 failed runs count as crashes** — `infeasible_plan` (waypoints needing more than 4 m/s² lateral
-  acceleration) ends the episode with the collision penalty (`emergency_brake` only with the gate on; MPC failures
-  no longer end episodes, see DESIGN §4); report both next to `collision`. Early M3 training will end many episodes at the first decision with
-  `infeasible_plan` (random waypoints); it should fall within a few hundred thousand steps.
+* **M3 plans over the lateral-acceleration limit no longer end episodes** (2026-11-22; DESIGN §4): they are flown
+  and counted (`infeasible_count`). The `infeasible_plan` termination column stays in `episodes.csv` (0 for new runs)
+  so earlier runs, where it was a crash, still compare. `emergency_brake` only with the gate on.
 * **M3 decides once per second**: a car cutting in mid-decision is the corridor/MPC's problem. The corridor ignores
   cars more than 2 m behind the ego (`corridor.rear_range`); keeping clear of faster traffic from behind is the RL's.
 * **Spurious off-road**: MetaDrive's lane raycast can miss at road-piece seams (an `off_road` end near a lane
@@ -158,3 +158,36 @@ python scripts/view.py live --checkpoint <run>/checkpoints/best.zip --seeds 1017
 python scripts/view.py replay --episode <run>/episodes/<id>.npz --checkpoint <run>/checkpoints/best.zip
 ```
 Always `unset PYTHONPATH` (ROS) and `export SDL_VIDEODRIVER=dummy` on headless nodes.
+
+## 8. Warm-start batch (2026-11-21/22, old r4 weights) and what changed for the next one
+
+Jobs 66584139–41 (`m1_warm m2_warm m3_warm`, seed 0), runs in `runs/warm/<m>/r4_straight/seed_0/`. 40 eval seeds,
+deterministic. Reward then: time 0.1, speed_gap 2, success +50, crash −2000.
+
+| | step 0 (= the clone) | best eval round | final | from scratch, round 3 (final) |
+|---|---|---|---|---|
+| M1 | 0 %, −2012, 60 km/h | 25 %, −1483 (3.0M) | 12.5 %, 75 km/h, 75–85 % crash | 0 % (one 48 % spike at 0.8M) |
+| M2 | 22 %, 47 km/h | 100 %, −174 (3.4M) | 100 %, 45 km/h | 0 % (collapsed) |
+| M3 | 100 %, 44 km/h | 100 %, −172 (1.6M) | 100 %, 45 km/h | ~90 %, 25 km/h (old MPC) |
+
+Mechanics all worked: clone loaded (step-0 eval = clone), actor unfrozen at ~107k steps with no drop, approx_kl
+~0.01 (M2) / ~0.03 (M1, M3), memory flat at 16–19 GB (the `store_map` fix held). M1 hit the 450-min wall at 3.58M of
+6M steps (133 steps/s); M2 (279 min) and M3 (231 min) finished their step budgets with hours to spare.
+
+Findings:
+* **M2 and M3 learned to follow traffic, never pass**: ~44 km/h, 0.75 lane changes per episode (the spawn merge)
+  in every eval round, speed term ≈ −335 of the ≈ −175 return. Passing was worth ~+340 and risked −2000.
+* **M3's only training failures were `infeasible_plan`** (101 of 2817 episodes, none in eval): exploration noise
+  (0.8 m per waypoint) pushed lane changes ~10 % over the lateral-acceleration limit, each charged as a crash. Sideways
+  exploration was what got punished (`docs/m3-mpc-lessons.md` §8).
+* **M1 never brakes**: the clone has no braking-for-traffic data and the low noise (std 0.13) does not discover it.
+  The reward is not its bottleneck; corrective drives (DAgger) are.
+
+Changes for the next batch (2026-11-22):
+1. M3 infeasible plans are flown and counted (`infeasible_count`), no longer a termination (DESIGN §4).
+2. Reward weights for speed (§2): time 0.3, speed_gap 6, success +500, crash −4000. Passing is worth ~+1180 and pays
+   while its crash risk is below ~26 % (was 16 %; −2000 with the new speed terms would have allowed ~46 %).
+3. The clones are unchanged: behaviour cloning never sees the reward or the termination rule; the M3 clone never
+   asked for an infeasible plan in its (100 %) selection drives. Only the PPO stage reruns.
+4. From-scratch baselines rerun too (`JOBS="m3_warm m2_warm m1_warm m3 m2 m1"`): returns from different weight
+   sets do not compare; compare success, speed and crash rate across batches.

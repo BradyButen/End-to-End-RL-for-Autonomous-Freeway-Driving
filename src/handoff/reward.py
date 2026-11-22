@@ -63,7 +63,7 @@ class Reward:
             "progress": ego.s - prev.s,
             "time": -1.0,
             "success": float(bool(info.get("arrive_dest"))),
-            "collision": float(crashed(info) or bool(info.get("emergency_brake") or info.get("infeasible_plan"))),
+            "collision": float(crashed(info) or bool(info.get("emergency_brake"))),
             "off_road": float(bool(info.get("out_of_road"))),
             "lane_change": self._lane_change(prev, ego),
             "heading": -max(abs(ego.psi_err) - HEADING_DEADBAND, 0.0),

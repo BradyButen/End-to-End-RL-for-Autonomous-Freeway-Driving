@@ -54,7 +54,7 @@ src/handoff/
   reward.py       reward terms (weights in configs/r4_straight.yaml)
   m1.py           M1 end-to-end, B0 IDM baseline
   m2.py           M2: (d*, v*) -> quintic reference -> cascaded PID
-  m3.py           M3: waypoints -> spline -> road corridor -> e-brake gate -> MPC
+  m3.py           M3: waypoints -> spline -> road corridor -> MPC (soft corridor)
   mpc.py          the CasADi MPC and its fallbacks
   reference.py    reference path type + quintic polynomial (shared by M2 and M3)
   train.py        PPO training (callback, eval / checkpoint cadence, watchdog)

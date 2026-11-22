@@ -1,0 +1,80 @@
+{
+  "best_epoch": 1,
+  "best": {
+    "epoch": 1,
+    "train_loss": 6.552250309472275,
+    "val_loss": 5.78706169128418,
+    "val_mae": 0.5108444094657898,
+    "val_mae_per_dim": "[0.33160001039505005, 0.6901000142097473]",
+    "drive_dist": 535.4847434997558,
+    "drive_return": -1939.1087190735154,
+    "drive_speed_kmh": 46.73292152578986,
+    "drive_success": 0.1,
+    "drive_off_road": 0.0,
+    "drive_collision": 0.9,
+    "seconds": 14.7884042263031
+  },
+  "baseline_val_loss": 8.070396423339844,
+  "drive_seeds": [
+    100,
+    101,
+    102,
+    103,
+    104,
+    105,
+    106,
+    107,
+    108,
+    109
+  ],
+  "train_samples": 1346,
+  "val_samples": 306,
+  "val_episodes": [
+    8,
+    10,
+    12
+  ],
+  "val_seeds": [
+    391,
+    856,
+    903
+  ],
+  "event_frac": 0.42867756315007427,
+  "event_weights": [
+    1.442831215970962,
+    10.0
+  ],
+  "args": {
+    "data": "runs/demos/m2.npz",
+    "out": "runs/bc/m2/laptop",
+    "reward": "r4_straight",
+    "epochs": 40,
+    "batch_size": 128,
+    "lr": 0.0003,
+    "weight_decay": 0.0,
+    "val_episodes": 3,
+    "max_weight": 10.0,
+    "patience": 10,
+    "select": "return",
+    "drive_seeds": [
+      100,
+      101,
+      102,
+      103,
+      104,
+      105,
+      106,
+      107,
+      108,
+      109
+    ],
+    "drive_every": 1,
+    "n_workers": 4,
+    "keep_prev_action": false,
+    "seed": 0
+  },
+  "masked_feature_columns": [
+    259,
+    260
+  ]
+}

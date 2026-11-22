@@ -19,6 +19,7 @@ Branch: `human-demos` (from Brady's `New_RL_Formulations`, with `main` merged in
 | 3 | PPO warm start option in `scripts/train.py` | ✅ done, tested locally (off by default) |
 | 3b | 1 h laptop pilot of the warm start (`scripts/laptop_warm_trial.sh`) | ✅ first positive M1 returns, see below |
 | 4 | from-scratch vs warm-start runs on Great Lakes (`slurm/launch_batch.sh`) | ⏳ launching |
+| 5 | M2 / M3 clones: the same drives relabelled in their actions (`build_demos.py --method m2/m3`) | ✅ code ready, offline-checked; clones to build (`METHOD=m3 CLONE_ONLY=1 scripts/laptop_warm_trial.sh`) |
 
 **M1's action changed (2026-11-21)** from raw `throttle_brake` to a target acceleration (`method.accel_range`
 [−4, 2.9] m/s², 0 = hold speed; `src/handoff/m1.py`): raw throttle_brake is ~5× stronger on the brake side, so
@@ -229,16 +230,68 @@ Local tests (tiny runs, 3,000 control steps): with the warm-up longer than the r
 the clone (max change 0.0) while the critic trained; with a 1,500-step warm-up the actor is frozen for the first two
 updates, unfrozen at 1,536 steps, and changes after; a run without `init_policy` is unchanged.
 
+## Step 5 — converting human drives into M2 / M3 actions
+
+The human drove with steering and throttle. M2 and M3 never output those: M2 picks a lateral target and speed
+(d*, v*) every 0.5 s and its quintic + cascaded PID fly it; M3 picks up to 5 waypoints and a speed v* every 1 s and
+its spline + corridor + MPC fly it. So the drives are relabelled in **hindsight**: at each decision, the label is
+what the human's next few seconds of driving show they were going for, written in the method's own action.
+
+**1. Observations — reused, not re-rendered.** Every method sees the same observation (5×84×84 BEV + 5-number ego
+vector) and MetaDrive builds the BEV every 0.1 s control step regardless of the method. The replay of step 1 (logged
+`[steering, throttle_brake]` fed back on the same seed, checked to ≤ 5 cm) therefore already produces the exact
+observation M2 / M3 would see at each control step; the dataset keeps the ones at decision times (every 5th control
+step for M2, every 10th for M3). The replay also records the ego state (s, d, v) before every step: the human's
+trajectory in road coordinates, from which the labels are read.
+
+**2. M2 labels — the reference trajectory the human travelled.** At decision t the label is the human's lateral
+offset and speed `trajectory.horizon` = 2 s later: d* = d(t + 2 s), v* = v(t + 2 s) (clipped to 0–80 km/h). That is
+exactly the end point of the quintic M2 builds from (d*, v*), so the quintic reference runs from where the car is to
+where the human actually was 2 s later, and the PID (unchanged gains) tracks it. Encoded with `M2.encode`
+(d* over [right edge − 1 m, left edge + 1 m], v* over [0, v_cap]). 17 drives → 1,652 samples, mean v* 75 km/h.
+
+**3. M3 labels — the human path, sampled into waypoints.** At decision t:
+* spacing ds = human speed × 2 s, clipped to `ds_range` [5, 40] m (≈ 36–40 m at 77 km/h; `--m3-spacing-s`),
+* 5 waypoints at s(t) + ds, + 2 ds, … + 5 ds (≈ 180 m, ~8 s ahead), each at the human's lateral offset where they
+  passed that s (held at the last offset beyond the end of the drive, as M3's spline extends flat), all 5 slots used,
+* v* = the human's highest speed over the next 3 s (`--m3-speed-ahead-s`; clipped to 20–80 km/h). v* is M3's
+  speed target AND hard ceiling: the mean over the whole ~8 s waypoint stretch made M3 slow ~175 m before the human;
+  the next-second speed capped it at the human's speed, so it could never catch up after falling behind.
+
+**Feasibility.** M3 ends an episode as `infeasible_plan` when a plan's peak lateral acceleration exceeds 4 m/s²
+(`m3.plan_lat_accel`: a quintic per segment, flat at every waypoint, so 5.77·|Δd|·v²/Δs²). Keyboard lane changes take
+~40 m at 77 km/h, and every plan whose lookahead contains one fails: **47–54 % of the human plans** at any spacing.
+Dropping them (`--m3-infeasible drop`) would remove every lane change from the data. Default
+`--m3-infeasible smooth`: the waypoint offsets are rate-limited to the feasible |Δd| per segment (95 % of the limit),
+so the plan heads for the same lane but spreads the move over more distance; every smoothed plan is re-checked. With
+2 s spacing the smoothed plans stay close to the human path (max offset: median 0.0 m, 90 % within 1.8 m; 391 plans
+contain a lane change) — 1 s spacing (~20 m) lags more (90 % within 2.7 m, 205 lane-change plans), because the
+allowed |Δd| grows with Δs². 829 samples, none dropped.
+
+**4. Weighting.** Most decisions are "keep the lane, keep the speed". Each sample carries per-dimension `flags` for
+the rare events — a lateral move > 0.5 m (M2's d*; M3's waypoint offsets) and slowing > 1 m/s (v*) — and `bc.py`
+up-weights them by their inverse frequency (capped at `--max-weight`), the same scheme as M1's steering / braking.
+
+**5. Cloning and warm start** are unchanged: the same PPO network for that method (only the action head's size
+differs: M2 2, M3 12 outputs), the previous-action ego features masked, checkpoint picked by driving seeds 100–109
+(M2 / M3: by mean return, since their controllers finish most drives even untrained), then
+`training.init_policy=data/bc/<m>_clone.zip`.
+
+```bash
+METHOD=m2 CLONE_ONLY=1 scripts/laptop_warm_trial.sh   # runs/demos/m2.npz -> runs/bc/m2/laptop -> data/bc/m2_clone.zip
+METHOD=m3 CLONE_ONLY=1 scripts/laptop_warm_trial.sh   # same for M3 (BC 20 epochs: MPC driving tests are slow)
+METHOD=m3 scripts/laptop_warm_trial.sh                # + a 60 min warm-start trial
+python scripts/view.py live --checkpoint data/bc/m3_clone.zip --seeds 1003   # watch a clone drive
+```
+
 ### Launching on Great Lakes (step 4)
 
-Same method, reward, budget and seeds as the from-scratch M1 runs; only the warm-start settings differ. A separate
-`runs_root` keeps the two groups apart:
+Same method, reward, budget and seeds as the from-scratch runs; only the warm-start settings differ, and a separate
+`runs_root` (`runs/warm/`) keeps the two groups apart. `slurm/launch_batch.sh` submits both kinds for every method
+(jobs `m1 m2 m3 m1_warm m2_warm m3_warm`; a warm job needs its `data/bc/<m>_clone.zip` committed):
 ```bash
-# from scratch (baseline) - Brady's normal M1 runs
-sbatch --export=ALL,METHOD=m1,REWARD=r4_straight,SCENARIO=freeway,SEED=0 slurm/train.sbatch
-
-# warm start from the clone
-sbatch --export=ALL,METHOD=m1,REWARD=r4_straight,SCENARIO=freeway,SEED=0,EXTRA="--set training.init_policy=data/bc/m1_clone.zip --set training.init_log_std=-2.0 --set training.critic_warmup_control_steps=100000 --set experiment.runs_root=runs/warm" slurm/train.sbatch
+DRY=1 bash slurm/launch_batch.sh                            # print the 6 sbatch commands
+JOBS="m1_warm m2_warm m3_warm" bash slurm/launch_batch.sh   # warm starts only
 ```
 Repeat for SEED=0,1,2 (at least). Compare with `scripts/plot.py curves runs/m1/r4_straight/seed_*/* runs/warm/m1/r4_straight/seed_*/*`
 and `scripts/compare.py`. Optional ablation: warm start with the default `log_std` (drop `init_log_std`) to separate
@@ -250,8 +303,10 @@ and `scripts/compare.py`. Optional ablation: warm start with the default `log_st
 |---|---|
 | `scripts/drive.py` | drive it yourself (Brady) |
 | `data/human_demos/*.npz` | the 17 curated episodes (git-tracked) |
-| `scripts/build_demos.py` | logs → `runs/demos/m1.npz` by deterministic replay |
-| `scripts/bc.py` | behaviour cloning → `runs/bc/m1/<ts>/` (PPO-compatible checkpoint) |
-| `data/bc/m1_clone.zip` | the clone used for the warm start (git-tracked) |
+| `scripts/build_demos.py` | logs → `runs/demos/<m>.npz` by deterministic replay (`--method m1/m2/m3` labels) |
+| `scripts/bc.py` | behaviour cloning → `runs/bc/<m>/<ts>/` (PPO-compatible checkpoint) |
+| `data/bc/<m>_clone.zip` | the clones used for the warm starts (git-tracked) |
+| `scripts/laptop_warm_trial.sh` | dataset → clone → `data/bc/<m>_clone.zip` → laptop warm-start trial |
+| `slurm/launch_batch.sh` | Great Lakes batch: from-scratch and warm-start jobs per method and seed |
 | `src/handoff/train.py`, `configs/base.yaml` | warm-start settings `training.init_policy`, `init_log_std`, `critic_warmup_control_steps` |
 | `docs/human-data-pipeline.md` | this file |

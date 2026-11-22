@@ -7,17 +7,19 @@ pipeline below turns them into controls.
       check    the waypoints must be drivable: each spline segment's peak lateral acceleration
                (5.77 |dd| v^2 / ds^2) within the MPC's max_lat_accel, else the plan is infeasible  (per decision)
       spline   piecewise quintic in s through the waypoints, flat 80 m beyond the last, speed v* (per decision)
-      gate     a car in the planned path (the line ego -> next waypoint crosses its keep-out zone) that the ego
-               closes on faster than it can stop for (dv^2 / 2 gap > gate_decel) -> emergency brake, no MPC solve
+      gate     (ebrake.gate, OFF by default) a car in the planned path (the line ego -> next waypoint crosses its
+               keep-out zone) closed on faster than gate_decel allows -> emergency brake, no MPC solve
       corridor one road-aligned box per MPC stage around the trajectory (spline at a ramp to v*):
                lateral faces at the exterior lane centres (+- inset), cut by the cars' keep-out zones
-      MPC      mpc.py: tracks the trajectory inside the corridor (hard constraints); v* is also its speed ceiling
+      MPC      mpc.py: tracks the trajectory inside the corridor (soft constraints: exact penalty, so the corridor
+               holds whenever it can); v* is also its speed ceiling. Braking for cars is the MPC's job.
 
-Failed runs (ebrake.ends_episode), all with the collision penalty: the RL is charged for plans the controller
-cannot carry out, instead of the car stopping dead on the freeway.
+Failed runs (ebrake.ends_episode), with the collision penalty: the RL is charged for plans the controller cannot
+carry out.
   * infeasible waypoints -> the episode ends at once as "infeasible_plan";
-  * the gate fires, or the MPC still fails after replaying its last plan (mpc.replay_steps) -> "emergency_brake".
-With ends_episode false (scripts/validate.py run) none of these end the run: the car brakes and you see it.
+  * the gate fires (only with ebrake.gate on) -> "emergency_brake".
+MPC solve failures never end the episode: the previous plan is replayed, then the car holds speed and lane until
+a solve succeeds (mpc.py). With ends_episode false (scripts/validate.py run) nothing ends the run.
 """
 
 from __future__ import annotations
@@ -78,10 +80,18 @@ class Corridor:
       * lateral faces: the exterior lane centres pulled in by ``inset`` (-0.3 = 0.3 m wider: d in [-7.3, +0.3]);
       * keep-out zone of a car: its footprint + keepout_s fore / aft + margin_d sideways, predicted at constant
         velocity, grown by the ego half-size (the box constrains the ego CENTRE, so the body stays out of the zone);
-      * a zone the spline runs through (within the zone's own s-range) is "in path", and depending on where the car
-        is NOW: ahead -> front face at the zone's rear (every stage: past the car the box ends behind the stage
-        point, so the MPC must brake); behind -> back face at its front; alongside -> lateral face on the ego's side;
-      * a zone NOT in path but level with the stage point (s_rear < s_k < s_front) cuts that side's lateral face.
+      * each car's face is decided stage by stage, from where the stage point (s_k, d_k) and the car's predicted
+        zone are AT THAT STAGE, with a state that starts from where the car is now (ahead / behind / alongside)
+        and carries through the horizon:
+          behind it (zone ahead): front face at the zone's rear while the stage point overlaps it laterally;
+          level with it, beside it: lateral face on the stage point's side;
+          ahead of it (zone behind): back face at the zone's front while overlapping laterally.
+        Behind -> level only at a stage where the stage point is level with the zone AND laterally clear (passing
+        beside); a plan that runs into or through the car stays "behind" for the rest of the horizon (front face:
+        it cannot drive through, even if the plan is laterally clear once past it). Level -> ahead once the stage point
+        is past the zone: a plan that overtakes a slower car and merges in front of it gets a back face there, not
+        a front face (the old rule - any car ahead NOW whose zone the spline crosses -> front face at every
+        stage - made M3 follow a slower car in the next lane instead of passing it).
     No front / back face = BIG. A face that cannot be reached in time makes the MPC infeasible (-> emergency brake).
     """
 
@@ -127,11 +137,16 @@ class Corridor:
             zl, zw = self.keepout_half(o)
             zones.append((o.s + sdot * t, o.d + ddot * t, zl + 0.5 * self.L, zw + 0.5 * self.W,
                           float(wrap_angle(o.psi - road.heading_at(o.s)))))
-        # Where each car is relative to the ego NOW (zone rear / front vs the ego's current s): decides which face
-        # it gets at every stage. Classifying with the predicted zone instead turned a slower car the ego had just
-        # passed into "ahead" for the late stages (its predicted rear passes the ego's current s), putting a front
-        # face far behind the stage points: an infeasible corridor on every merge back in front of a slower car.
-        now = [(so[0] - hl, so[0] + hl) for so, _, hl, _, _ in zones]
+        # Initial state of each car relative to the ego NOW (zone rear / front vs the ego's s), then advanced stage by
+        # stage. (Classifying a car with its predicted zone against the ego's CURRENT s turned a slower car the ego
+        # had just passed into "ahead" for the late stages; here the predicted zone is compared with the stage
+        # point at the same time.)
+        BEHIND, LEVEL, AHEAD = 0, 1, 2      # the stage point is behind / level with / ahead of the car's zone
+        state, side = [], []
+        for so, do, hl, _, _ in zones:
+            rear_now, front_now = so[0] - hl, so[0] + hl
+            state.append(BEHIND if rear_now >= ego.s else AHEAD if front_now <= ego.s else LEVEL)
+            side.append(ego.d >= do[0])     # True: the ego is on the car's left
         d_lo0 = min(road.lane_centers) + self.inset
         d_hi0 = max(road.lane_centers) - self.inset
         A, b = np.zeros((K + 1, 4, 2)), np.zeros((K + 1, 4))
@@ -140,26 +155,32 @@ class Corridor:
         for k in range(K + 1):
             sk, dk = traj[k, 0], traj[k, 1]
             front, back, lo, hi = self.BIG, -self.BIG, d_lo0, d_hi0
-            for (so, do, hl, hw, rel), (rear_now, front_now) in zip(zones, now):
+            for i, (so, do, hl, hw, rel) in enumerate(zones):
                 cr, sr = np.cos(rel), np.sin(rel)   # the zone's road-frame bounding box at stage k
                 ss = [so[k] + cr * su * hl - sr * sw * hw for su, sw in corner_signs]
                 dd = [do[k] + sr * su * hl + cr * sw * hw for su, sw in corner_signs]
                 sa, sb, da, db = min(ss), max(ss), min(dd), max(dd)
-                seg = (ref.s >= sa) & (ref.s <= sb)
-                if np.any((ref.d[seg] > da) & (ref.d[seg] < db)):    # in path
-                    if rear_now >= ego.s:      # ahead of the ego now: stay behind its (predicted) rear face
-                        front = min(front, sa - sk)
-                    elif front_now <= ego.s:   # behind the ego now: stay ahead of its (predicted) front face
-                        back = max(back, sb - sk)
-                    elif ego.d >= do[0]:       # alongside now: stay on the ego's side
+                overlap = da < dk < db
+                lon = BEHIND if sk < sa else AHEAD if sk > sb else LEVEL
+                st = state[i]
+                if st == BEHIND and lon == LEVEL and not overlap:        # drew level beside it: passing
+                    st, side[i] = LEVEL, dk >= do[k]
+                if st == LEVEL and lon == AHEAD:                         # past it
+                    st = AHEAD
+                elif st == LEVEL and lon == BEHIND:                      # fell back
+                    st = BEHIND
+                elif st == AHEAD and lon == LEVEL and not overlap:       # it caught up, beside the stage point
+                    st, side[i] = LEVEL, dk >= do[k]
+                state[i] = st
+                if st == BEHIND and (overlap or lon != BEHIND):          # stay behind its rear
+                    front = min(front, sa - sk)
+                elif st == AHEAD and (overlap or lon != AHEAD):          # stay ahead of its front
+                    back = max(back, sb - sk)
+                elif st == LEVEL:                                        # stay on our side of it
+                    if side[i]:
                         lo = max(lo, db)
                     else:
                         hi = min(hi, da)
-                elif sa < sk < sb:             # level with the stage point, beside the path
-                    if da >= dk:
-                        hi = min(hi, da)
-                    else:
-                        lo = max(lo, db)
             right, left = lo - dk, hi - dk
             extents[k] = [back, front, right, left]
             h = road.heading_at(sk)

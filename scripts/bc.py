@@ -1,16 +1,18 @@
 #!/usr/bin/env python
-"""Behaviour cloning (BC) of M1 from human drives: fit PPO's own policy network to the human's actions.
+"""Behaviour cloning (BC) of M1, M2 or M3 from human drives: fit PPO's own policy network to the human's actions.
 
-Input: the dataset from scripts/build_demos.py (runs/demos/m1.npz). Output: a run folder that looks like a PPO run,
-so the clone can be driven / evaluated with the normal tools and later loaded as a PPO warm start:
+Input: the dataset from scripts/build_demos.py (runs/demos/<method>.npz; the method is read from it). Output: a run
+folder that looks like a PPO run, so the clone can be driven / evaluated with the normal tools and later loaded as a
+PPO warm start (training.init_policy):
 
-    runs/bc/m1/<timestamp>/
-        config.yaml               M1 config (+ a "bc" section with these settings)
+    runs/bc/<method>/<timestamp>/
+        config.yaml               the method's config (+ a "bc" section with these settings)
         checkpoints/best.zip      SB3 PPO model of the selected epoch (--select: best driving, or lowest val loss)
         bc_progress.csv           per-epoch train / validation losses, steering metrics, driving results
         bc_summary.json           dataset split, settings, best epoch
 
-    python scripts/bc.py                                     # defaults: 40 epochs, 3 held-out episodes
+    python scripts/bc.py                                     # M1, defaults: 40 epochs, 3 held-out episodes
+    python scripts/bc.py --data runs/demos/m3.npz            # M3 (labels: waypoints + v*, build_demos.py --method m3)
     python scripts/bc.py --epochs 5                          # quick smoke run
     python scripts/bc.py --weight-decay 0.05 --max-weight 3  # regularised variant
     python scripts/evaluate.py --checkpoint runs/bc/m1/<ts>/checkpoints/best.zip --n-workers 4   # drive it
@@ -28,12 +30,15 @@ Two guards against the usual BC failure modes:
   * imbalance: ~88 % of samples have no steering and ~1 % brake. Samples that steer (|steering| > 0.02) or brake
     (throttle_brake < -0.01) are up-weighted by the inverse of their frequency (capped at --max-weight), and each
     action dimension's error is divided by its label variance so the small steering numbers are not drowned out by
-    throttle.
+    throttle. M2 / M3: the dataset's ``flags`` mark the rare samples per action dimension (lateral moves > 0.5 m,
+    slowing > 1 m/s), weighted the same way.
 
 Checkpoint selection (--select drive, the default): validation loss turned out to be a poor guide to whether the
 clone can drive, so after every --drive-every epochs the clone drives --drive-seeds (training-range seeds that are not
 in the demos; the 40 evaluation seeds stay untouched) and the epoch with the furthest mean distance is kept (ties:
-lower val loss). Overfitting is countered with AdamW weight decay (--weight-decay).
+lower val loss). M2 / M3 finish most drives even untrained (their controllers keep the car on the road), so there
+the mean return (the training reward) selects (--select return, their default). Overfitting is countered with AdamW
+weight decay (--weight-decay).
 """
 
 import argparse
@@ -51,9 +56,9 @@ BRAKE_ACTIVE = -0.01
 
 
 class _SpacesOnly:
-    """Stand-in env with the M1 spaces, so PPO can build its policy without starting MetaDrive."""
+    """Stand-in env with the method's spaces, so PPO can build its policy without starting MetaDrive."""
 
-    def __init__(self, cfg: dict):
+    def __init__(self, cfg: dict, action_dim: int):
         import gymnasium as gym
 
         bev = cfg["observation"]["bev"]
@@ -62,10 +67,10 @@ class _SpacesOnly:
                                   dtype=np.float32),
             "ego": gym.spaces.Box(-5.0, 5.0, shape=(len(cfg["observation"]["ego_features"]),), dtype=np.float32),
         })
-        self.action_space = gym.spaces.Box(-1.0, 1.0, shape=(2,), dtype=np.float32)
+        self.action_space = gym.spaces.Box(-1.0, 1.0, shape=(action_dim,), dtype=np.float32)
 
 
-def build_model(cfg: dict, seed: int):
+def build_model(cfg: dict, seed: int, action_dim: int = 2):
     """The PPO model scripts/train.py would build for this config (same policy class and kwargs)."""
     import warnings
 
@@ -77,7 +82,7 @@ def build_model(cfg: dict, seed: int):
 
     warnings.filterwarnings("ignore", message=".*mini-batch size.*")   # rollout-buffer sizing; irrelevant here
 
-    spaces = _SpacesOnly(cfg)
+    spaces = _SpacesOnly(cfg, action_dim)
 
     class _Env(gym.Env):
         observation_space, action_space = spaces.observation_space, spaces.action_space
@@ -139,10 +144,24 @@ def sample_weights(a: np.ndarray, max_weight: float) -> tuple[np.ndarray, dict]:
                "steer_weight": float(ws), "brake_weight": float(wb)}
 
 
+def flag_weights(flags: np.ndarray, max_weight: float) -> tuple[np.ndarray, dict]:
+    """M2 / M3: per action dimension, flagged (rare) samples get the inverse of their frequency (capped)."""
+    w = np.ones(flags.shape, np.float32)
+    per_dim = []
+    for j in range(flags.shape[1]):
+        f = flags[:, j]
+        wj = min(max_weight, (~f).sum() / max(f.sum(), 1)) if f.any() else 1.0
+        w[f, j] = wj
+        per_dim.append(float(wj))
+    return w, {"event_frac": float(flags.any(axis=1).mean()), "event_weights": per_dim}
+
+
 def drive_score(summaries: list[dict]) -> dict:
     dist = np.array([float(s["distance"]) for s in summaries])
     term = [s["termination"] for s in summaries]
-    return {"drive_dist": float(dist.mean()), "drive_success": float(np.mean([t == "success" for t in term])),
+    return {"drive_dist": float(dist.mean()), "drive_return": float(np.mean([float(s["return"]) for s in summaries])),
+            "drive_speed_kmh": float(np.mean([float(s["mean_speed"]) for s in summaries]) * 3.6),
+            "drive_success": float(np.mean([t == "success" for t in term])),
             "drive_off_road": float(np.mean([t == "off_road" for t in term])),
             "drive_collision": float(np.mean([t == "collision" for t in term]))}
 
@@ -150,7 +169,7 @@ def drive_score(summaries: list[dict]) -> dict:
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--data", default="runs/demos/m1.npz")
-    p.add_argument("--out", default=None, help="run folder (default runs/bc/m1/<timestamp>)")
+    p.add_argument("--out", default=None, help="run folder (default runs/bc/<method>/<timestamp>)")
     p.add_argument("--reward", default="r4_straight", help="reward config written into config.yaml (BC ignores it)")
     p.add_argument("--epochs", type=int, default=40)
     p.add_argument("--batch-size", type=int, default=128)
@@ -158,11 +177,14 @@ def main():
     p.add_argument("--weight-decay", type=float, default=0.0, help="AdamW weight decay (0 = plain Adam)")
     p.add_argument("--val-episodes", type=int, default=3, help="whole episodes held out for validation")
     p.add_argument("--max-weight", type=float, default=10.0, help="cap of the steer / brake up-weighting")
-    p.add_argument("--patience", type=int, default=10, help="stop after this many tested epochs without a better selection score")
-    p.add_argument("--select", choices=["drive", "val"], default="drive", help="checkpoint selection criterion")
+    p.add_argument("--patience", type=int, default=10,
+                   help="stop after this many tested epochs without a better selection score")
+    p.add_argument("--select", choices=["drive", "return", "val"], default=None,
+                   help="checkpoint selection: furthest drive (M1 default), best drive return (M2 / M3 default), "
+                        "lowest val loss")
     p.add_argument("--drive-seeds", type=int, nargs="+", default=list(range(100, 110)),
                    help="training-range seeds the clone drives for selection (demo seeds are removed)")
-    p.add_argument("--drive-every", type=int, default=1, help="epochs between driving tests")
+    p.add_argument("--drive-every", type=int, default=None, help="epochs between driving tests (default 1; M3: 2)")
     p.add_argument("--n-workers", type=int, default=5, help="parallel driving workers")
     p.add_argument("--keep-prev-action", action="store_true", help="do NOT mask the previous-action ego features")
     p.add_argument("--seed", type=int, default=0)
@@ -179,26 +201,37 @@ def main():
     # ------------------------------------------------------------------ data
     z = np.load(args.data)
     bev_u8, ego, act, ep = z["bev"], z["ego"].astype(np.float32), z["action"].astype(np.float32), z["episode"]
+    method = str(z["method"]) if "method" in z.files else "m1"
+    is_m1 = method == "m1"
+    args.select = args.select or ("drive" if is_m1 else "return")
+    args.drive_every = args.drive_every or (2 if method == "m3" else 1)
     n_ep = int(ep.max()) + 1
     val_eps = sorted(rng.choice(n_ep, size=min(args.val_episodes, n_ep - 1), replace=False).tolist())
     is_val = np.isin(ep, val_eps)
     tr_idx, va_idx = np.where(~is_val)[0], np.where(is_val)[0]
 
-    cfg = load_config("m1", reward=args.reward)
+    cfg = load_config(method, reward=args.reward)
     feats = list(cfg["observation"]["ego_features"])
     mask_idx = [] if args.keep_prev_action else [feats.index(f) for f in PREV_ACTION_FEATURES]
     ego_in = ego.copy()
     ego_in[:, mask_idx] = 0.0
 
-    w_all, wstats = sample_weights(act[tr_idx], args.max_weight)
+    if is_m1:
+        def weigh(i):
+            return sample_weights(act[i], args.max_weight)
+    else:
+        flags = z["flags"].astype(bool)
+
+        def weigh(i):
+            return flag_weights(flags[i], args.max_weight)
+    w_all, wstats = weigh(tr_idx)
     weights = np.ones_like(act)
     weights[tr_idx] = w_all
-    wv, _ = sample_weights(act[va_idx], args.max_weight)   # validation weighted the same way (its own counts)
-    weights[va_idx] = wv
+    weights[va_idx] = weigh(va_idx)[0]      # validation weighted the same way (its own counts)
     var = np.maximum(act[tr_idx].var(axis=0), 1e-4).astype(np.float32)
 
     # ------------------------------------------------------------------ model
-    model = build_model(cfg, args.seed)
+    model = build_model(cfg, args.seed, act.shape[1])
     policy = model.policy
     cols = masked_feature_columns(policy, mask_idx) if mask_idx else []
     layers = first_layers(policy)
@@ -232,6 +265,9 @@ def main():
                 tot += float(loss_fn(m, a, w)) * len(a)
                 preds.append(m.numpy())
         pr, a = np.concatenate(preds), act[idx]
+        if not is_m1:
+            return {"loss": tot / len(idx), "mae": float(np.mean(np.abs(pr - a))),
+                    "mae_per_dim": np.round(np.mean(np.abs(pr - a), axis=0), 4).tolist()}
         steer = np.abs(a[:, 0]) > STEER_ACTIVE
         sign_acc = float(np.mean(np.sign(pr[steer, 0]) == np.sign(a[steer, 0]))) if steer.any() else np.nan
         return {"loss": tot / len(idx), "steer_mae": float(np.mean(np.abs(pr[:, 0] - a[:, 0]))),
@@ -244,25 +280,33 @@ def main():
                  "weight_decay": args.weight_decay, "select": args.select,
                  "val_episodes": val_eps, "max_weight": args.max_weight, "masked_ego_features":
                  [feats[i] for i in mask_idx], "seed": args.seed}
-    run = Path(args.out) if args.out else Path("runs/bc/m1") / dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    run = Path(args.out) if args.out else Path("runs/bc") / method / dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     run = make_run_dir(cfg, run)
     ckpt = run / "checkpoints" / "best.zip"
     drive_seeds = [s for s in args.drive_seeds if s not in set(int(x) for x in z["seeds"])]
     evaluator = None
-    if args.select == "drive":
+    if args.select in ("drive", "return"):
         from handoff.evaluate import ParallelEvaluator, policy_spec
 
         evaluator = ParallelEvaluator(cfg, None, min(args.n_workers, len(drive_seeds)), policy_spec(model))
         print(f"driving test after every {args.drive_every} epoch(s) on seeds {drive_seeds}")
 
-    # Reference: a "do nothing clever" predictor (zero steering, mean throttle) on the validation set.
-    base_pred = np.tile([0.0, act[tr_idx, 1].mean()], (len(va_idx), 1)).astype(np.float32)
+    # Reference: a "do nothing clever" predictor on the validation set (M1: zero steering, mean throttle; M2 / M3:
+    # the mean label).
+    mean_label = act[tr_idx].mean(axis=0)
+    if is_m1:
+        mean_label[0] = 0.0
+    base_pred = np.tile(mean_label, (len(va_idx), 1)).astype(np.float32)
     base_loss = float(((weights[va_idx] * (base_pred - act[va_idx]) ** 2) / var).mean())
     print(f"train {len(tr_idx)} samples ({n_ep - len(val_eps)} episodes), val {len(va_idx)} "
           f"(episodes {val_eps}); masked ego features: {[feats[i] for i in mask_idx] or 'none'}")
-    print(f"weights: steering active {wstats['steer_active_frac']:.0%} x{wstats['steer_weight']:.1f}, "
-          f"braking {wstats['brake_frac']:.1%} x{wstats['brake_weight']:.1f}; "
-          f"baseline val loss (zero steer, mean throttle) {base_loss:.3f}")
+    if is_m1:
+        print(f"weights: steering active {wstats['steer_active_frac']:.0%} x{wstats['steer_weight']:.1f}, "
+              f"braking {wstats['brake_frac']:.1%} x{wstats['brake_weight']:.1f}; "
+              f"baseline val loss (zero steer, mean throttle) {base_loss:.3f}")
+    else:
+        print(f"{method}: {act.shape[1]} action dims; event samples {wstats['event_frac']:.0%}, weights "
+              f"{wstats['event_weights']}; baseline val loss (mean label) {base_loss:.3f}")
     print(f"run folder: {run}\n")
 
     log = open(run / "bc_progress.csv", "w", newline="")
@@ -285,9 +329,10 @@ def main():
         if evaluator is not None and epoch % args.drive_every == 0:
             state = {k: v.detach().cpu() for k, v in policy.state_dict().items()}
             dr = drive_score(evaluator.evaluate(state, drive_seeds, deterministic=True))
-        row = {"epoch": epoch, "train_loss": tot / len(perm), **{f"val_{k}": v for k, v in va.items()},
-               "drive_dist": np.nan, "drive_success": np.nan, "drive_off_road": np.nan, "drive_collision": np.nan,
-               **dr, "seconds": time.time() - t0}
+        row = {"epoch": epoch, "train_loss": tot / len(perm),
+               **{f"val_{k}": (str(v) if isinstance(v, list) else v) for k, v in va.items()},
+               "drive_dist": np.nan, "drive_return": np.nan, "drive_speed_kmh": np.nan, "drive_success": np.nan,
+               "drive_off_road": np.nan, "drive_collision": np.nan, **dr, "seconds": time.time() - t0}
         if writer is None:
             writer = csv.DictWriter(log, fieldnames=list(row))
             writer.writeheader()
@@ -295,6 +340,8 @@ def main():
         log.flush()
         if args.select == "val":
             key = (va["loss"],)
+        elif dr and args.select == "return":
+            key = (-dr["drive_return"], va["loss"])
         elif dr:
             key = (-dr["drive_dist"], va["loss"])
         else:
@@ -306,12 +353,14 @@ def main():
             model.save(ckpt)
         elif key is not None:
             stale += 1
-        drive_txt = (f"  drive {dr['drive_dist']:4.0f} m, success {dr['drive_success']:.0%}, off road "
+        drive_txt = (f"  drive {dr['drive_dist']:4.0f} m, {dr['drive_speed_kmh']:.0f} km/h, return "
+                     f"{dr['drive_return']:.0f}, success {dr['drive_success']:.0%}, off road "
                      f"{dr['drive_off_road']:.0%}" if dr else "")
-        print(f"epoch {epoch:3d}  train {row['train_loss']:.3f}  val {va['loss']:.3f}  "
-              f"steer MAE {va['steer_mae']:.3f} (active {va['steer_mae_active']:.3f}, sign {va['steer_sign_acc']:.0%})  "
-              f"throttle MAE {va['throttle_mae']:.3f}{drive_txt}  {row['seconds']:.0f} s{'  *' if better else ''}",
-              flush=True)
+        fit = (f"steer MAE {va['steer_mae']:.3f} (active {va['steer_mae_active']:.3f}, "
+               f"sign {va['steer_sign_acc']:.0%})  throttle MAE {va['throttle_mae']:.3f}" if is_m1
+               else f"MAE {va['mae']:.3f}")
+        print(f"epoch {epoch:3d}  train {row['train_loss']:.3f}  val {va['loss']:.3f}  {fit}{drive_txt}  "
+              f"{row['seconds']:.0f} s{'  *' if better else ''}", flush=True)
         if stale >= args.patience:
             print(f"no improvement for {args.patience} epochs, stopping")
             break

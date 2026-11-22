@@ -15,13 +15,15 @@ method:
     ds: 1.0                    # path sample spacing (m)
     extend: 80.0               # path continues flat beyond the last waypoint (m)
   ebrake:
-    gate: true                 # emergency-brake (no MPC solve) when a car in the planned path (line ego -> next
-                               # waypoint crosses its keep-out zone) is closed on faster than gate_decel allows
-    gate_decel: 6.0            # m/s^2; fires when dv^2 / (2 gap) exceeds this (the MPC can plan down to -8)
+    gate: false                # true: emergency-brake (full brake, no MPC solve, ends the episode) when a car in the
+                               # planned path (line ego -> next waypoint crosses its keep-out zone) is closed on faster
+                               # than gate_decel allows. Off: braking for cars is the MPC's job (corridor front face,
+                               # accel down to -8 m/s^2); the gate pre-empted it at 6 m/s^2 and ended runs it could save
+    gate_decel: 6.0            # m/s^2; fires when dv^2 / (2 gap) exceeds this
     ends_episode: true         # failed runs end the episode with the collision penalty: infeasible waypoints
-                               # (peak spline lateral accel > mpc.max_lat_accel) -> "infeasible_plan"; the gate, or
-                               # an MPC still failing after replay_steps -> "emergency_brake". false (validate.py run):
-                               # the car brakes instead and the run goes on
+                               # (peak spline lateral accel > mpc.max_lat_accel) -> "infeasible_plan"; the gate (if on)
+                               # -> "emergency_brake". MPC solve failures never end it (mpc.py). false (validate.py
+                               # run): the car brakes instead and the run goes on
   corridor:                    # road-aligned boxes on the ego centre, one per MPC stage, rebuilt every control step
     inset: -0.3                # lateral faces = exterior lane centres pulled in by this (negative = wider): [-7.3, 0.3]
     keepout_s: 1.0             # car keep-out zone: car + keepout_s fore / aft (m); also used by the gate
@@ -50,13 +52,20 @@ method:
       inner_weight: 10.0
       inner_dist: 0.25         # m from the face where the inner 1/gap^2 barrier starts
     accel_bounds: [-8.0, 2.5]  # m/s^2 (-8 is about where MetaDrive braking stops being linear)
-    max_lat_accel: 4.0         # m/s^2, |v^2 tan(delta) / L| bound; also the waypoint feasibility limit (m3.py)
+    max_lat_accel: 9.3         # m/s^2, |v^2 tan(delta) / L| bound; also the waypoint feasibility limit (m3.py).
+                               # 9.3 = the peak of the human demos (keyboard lane changes); was 4.0 (comfort).
+                               # Near MetaDrive's grip (wheel_friction 0.9 -> ~8.8 m/s^2 on a friction circle):
+                               # the kinematic model does not see skidding, so expect some tracking loss up there
     steer_rate_limit: 0.6      # rad/s
     ceiling_brake: 4.0         # m/s^2; the v* speed ceiling ramps down from the current speed at this rate
     ebrake_steer: [1.0, 0.3, 0.06]   # emergency-brake steering gains: heading, heading-rate damping, lane pull
-    replay_steps:              # failed solve: replay the previous plan this many steps, then emergency brake
-      timeout: 5               # solver timeout / numerical failure      (which ends the episode as a failed run,
-      infeasible: 0            # infeasible problem (0 = brake at once)   see ebrake.ends_episode)
+    soft_corridor:             # corridor half-spaces A p <= b + sigma, sigma >= 0, cost l1 sum(sigma) + l2 sum(sigma^2)
+      l1: 1000.0               # per m of violation per stage: above the constraint multipliers -> exact penalty
+      l2: 1000.0               # (= the hard corridor whenever it is feasible); the plan's max slack is logged
+                               # (diag corridor_violation)
+    replay_steps:              # failed solve: replay the previous plan this many steps (1 s), then hold speed and
+      timeout: 10              # lane until a solve succeeds; never brakes, never ends the episode. Short: a stale
+      infeasible: 10           # plan replayed for long drove off the road (validate blocked, before the corridor fix)
     solver:
       max_iter: 100
       max_cpu_time: 0.1        # IPOPT limit in process CPU time (s); exceeding it = timeout. Slow but successful

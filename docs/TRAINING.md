@@ -80,9 +80,9 @@ What it showed (and what changed because of it):
 * No episode crashed in its first 3 s (spawns are clean).
 
 ## 6. Known risks for round 2
-* **M3 failed runs count as crashes** — `emergency_brake` (gate, or MPC still failing after its replay) and
-  `infeasible_plan` (waypoints needing more than 4 m/s² lateral acceleration) end the episode with the collision
-  penalty; report both next to `collision`. Early M3 training will end many episodes at the first decision with
+* **M3 failed runs count as crashes** — `infeasible_plan` (waypoints needing more than 4 m/s² lateral
+  acceleration) ends the episode with the collision penalty (`emergency_brake` only with the gate on; MPC failures
+  no longer end episodes, see DESIGN §4); report both next to `collision`. Early M3 training will end many episodes at the first decision with
   `infeasible_plan` (random waypoints); it should fall within a few hundred thousand steps.
 * **M3 decides once per second**: a car cutting in mid-decision is the corridor/MPC's problem. The corridor ignores
   cars more than 2 m behind the ego (`corridor.rear_range`); keeping clear of faster traffic from behind is the RL's.
@@ -135,16 +135,17 @@ threads; M2 / M3 updates are small (3.6k / 1.8k samples), so `standard` is fine.
 (140 GB for 20 cores) until the `mem` line shows the real growth rate (check the node's total with
 `scontrol show node <node>`).
 
-Launch a batch (`r4_straight` is the default reward; `--time=08:00:00` is the script default). Per seed:
-M1 from scratch and M1 warm-started from the behaviour-cloning clone (`gpu`), M2 and M3 (`standard`):
+Launch a batch (`r4_straight` is the default reward; every job gets `--time=08:00:00`). Per seed, each method
+from scratch (`m1 m2 m3`) and warm-started from its behaviour-cloning clone (`m1_warm m2_warm m3_warm`); M1 on
+`gpu`, M2 / M3 on `standard`. The class account runs 2 jobs at a time (`AssocMaxJobsLimit`), in submission order:
 ```bash
-DRY=1 bash slurm/launch_batch.sh              # print the sbatch commands
-bash slurm/launch_batch.sh                    # seed 0: 4 jobs
-SEEDS="0 1 2" bash slurm/launch_batch.sh      # 12 jobs
-JOBS="m1_warm" SEEDS="1 2" bash slurm/launch_batch.sh
+DRY=1 bash slurm/launch_batch.sh                            # print the sbatch commands (default: all 6)
+JOBS="m1_warm m2_warm m3_warm" bash slurm/launch_batch.sh   # warm starts only
+SEEDS="0 1 2" JOBS="m3_warm m3" bash slurm/launch_batch.sh
 ```
-Warm start (docs/human-data-pipeline.md): `training.init_policy=data/bc/m1_clone.zip`, `init_log_std=-2.0`,
-`critic_warmup_control_steps=100000`, output under `runs/warm/`, Slurm log `slurm-handoff-warm-<id>.out`.
+Warm start (docs/human-data-pipeline.md): `training.init_policy=data/bc/<m>_clone.zip`, `init_log_std=-2.0`,
+`critic_warmup_control_steps=100000`, output under `runs/warm/`, Slurm log `slurm-handoff-warm-<m>-<id>.out`
+(from scratch: `slurm-handoff-<m>-<id>.out`).
 `train.sbatch`: 20 cores → 14 training envs + 4 eval workers + main; `OMP_NUM_THREADS=1`. Each run writes
 `runs/<method>/r4_straight/seed_<n>/<timestamp>/`. Check `sacct -j <id> --format=MaxRSS` and lower `--mem-per-cpu`
 if far below 80 GB.

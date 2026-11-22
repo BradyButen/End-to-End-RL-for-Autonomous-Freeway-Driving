@@ -38,8 +38,8 @@
               determinism (same seed + actions -> identical trajectory; replay relies on it)
    m2         PID: lane 1 -> 0 -> 2 -> 1 with speed changes, scripted (d*, v*); cross-track / speed tolerances
    m3         passes a 35 km/h lead; stops for a stopped car in its lane; undrivable waypoints end the run as
-              infeasible_plan; a solver that keeps failing ends the run (as trained), or brakes and recovers
-              (ends_episode false)
+              infeasible_plan; a solver that keeps failing replays its plan, then holds speed and lane (never
+              brakes or ends the run) and recovers once the solver works
    smoke      M1 / M2 / M3 complete random-action episodes; logs consistent (terms, returns, decision counts)
    b0         B0 completes every evaluation seed through the evaluator
    train      PPO entry point end to end for a few hundred control steps per method (plumbing, not learning)
@@ -528,44 +528,39 @@ def m3_infeasible_plan() -> dict:
 
 
 def m3_failed_solve() -> dict:
-    out = {}
-    # (d) fallback chain: the solver raises -> replayed plan (replay_steps.timeout) -> emergency brake, which
-    #     ends the run as trained, or (ends_episode false) brakes and recovers once the solver works again
+    # (d) fallback chain: the solver raises (first try and the braking-guess retry) -> replayed plan
+    #     (replay_steps.timeout) -> hold speed and lane; the run never ends on it, and the MPC takes over again once
+    #     the solver works
     def broken(**_kw):
         raise RuntimeError("forced solver failure (validation)")
 
-    for ends in (True, False):
-        env = controlled_env("m3", ego_lane=1, ego_kmh=60.0,
-                             overrides=[f"method.ebrake.ends_episode={str(ends).lower()}"],
-                             label=f"m3 (d) solver forced to fail, ends_episode={ends}")
-        env.reset(options={"episode_seed": 0})
-        L = env.road.lane_centers
-        act = env.method.encode([30.0], [L[1]], kmh(60))
-        env.step(act)
-        healthy = int(np.sum(env.recorder.steps["fallback"]))
-        mpc = env.method.mpc
-        real, mpc.solver = mpc.solver, broken
-        reason = None
-        for _ in range(3):
-            _, _, te, tr, info = env.step(act)
-            if te or tr:
-                reason = info["termination"]
-                break
-        modes = {m.split(":")[-1] for m in env.recorder.status[-30:] if m.startswith("fallback")}
-        expected = {"emergency_brake"} | ({"shifted_previous"} if mpc.replay["timeout"] > 0 else set())
-        res = {"healthy_fallbacks": healthy, "modes_seen": sorted(modes), "modes_expected": sorted(expected),
-               "termination": reason}
-        if ends:
-            res["ok"] = bool(healthy == 0 and expected <= modes and reason == "emergency_brake")
-            out["failed_solve_ends_run"] = res
-        else:
-            mpc.solver = real
-            env.step(act)
-            res["recovered"] = not env.recorder.steps["fallback"][-1]
-            res["ok"] = bool(healthy == 0 and expected <= modes and reason is None and res["recovered"])
-            out["failed_solve_recovers"] = res
-        env.close()
-    return out
+    env = controlled_env("m3", ego_lane=1, ego_kmh=60.0, label="m3 (d) solver forced to fail")
+    env.reset(options={"episode_seed": 0})
+    L = env.road.lane_centers
+    act = env.method.encode([30.0], [L[1]], kmh(60))
+    env.step(act)
+    healthy = int(np.sum(env.recorder.steps["fallback"]))
+    mpc = env.method.mpc
+    real, mpc.solver = mpc.solver, broken
+    reason, v0 = None, env.ego.v
+    n_dec = (mpc.replay["timeout"] + 5) // env.method.period + 1      # long enough to use up the replay budget
+    for _ in range(n_dec):
+        _, _, te, tr, info = env.step(act)
+        if te or tr:
+            reason = info["termination"]
+            break
+    modes = {m.split(":")[-1] for m in env.recorder.status[-10 * n_dec:] if m.startswith("fallback")}
+    expected = {"hold_lane"} | ({"shifted_previous"} if mpc.replay["timeout"] > 0 else set())
+    v_hold = env.ego.v
+    mpc.solver = real
+    env.step(act)
+    res = {"healthy_fallbacks": healthy, "modes_seen": sorted(modes), "modes_expected": sorted(expected),
+           "termination": reason, "v_before_kmh": v0 * 3.6, "v_after_hold_kmh": v_hold * 3.6,
+           "recovered": not env.recorder.steps["fallback"][-1]}
+    res["ok"] = bool(healthy == 0 and expected <= modes and reason is None and res["recovered"]
+                     and v_hold > 0.8 * v0)        # held speed: no emergency brake
+    env.close()
+    return {"failed_solve": res}
 
 
 M3_CASES = {"pass_lead": m3_pass_lead, "stopped_car": m3_stopped_car, "infeasible_plan": m3_infeasible_plan,

@@ -44,6 +44,7 @@ def main():
     p.add_argument("--no-render", action="store_true")
     p.add_argument("--fps", type=float, default=10.0, help="10 = real time, 0 = as fast as possible")
     p.add_argument("--m3-spacing-s", type=float, default=2.0)
+    p.add_argument("--m2-ahead-s", type=float, default=1.0, help="M2 label lookahead (s)")
     p.add_argument("--set", dest="overrides", action="append", default=[], metavar="KEY=VALUE",
                    help="config overrides for the M2 / M3 runs")
     p.add_argument("--out", default=None)
@@ -97,7 +98,8 @@ def main():
         bd.labels_m3.smoothed = 0
         idx, act, _, _, dropped = bd.LABELS[m](r, cfg, labeller, SimpleNamespace(m3_spacing_s=args.m3_spacing_s,
                                                                                   m3_infeasible="smooth",
-                                                                                  m3_speed_ahead_s=3.0))
+                                                                                  m3_speed_ahead_s=3.0,
+                                                                                  m2_ahead_s=args.m2_ahead_s))
         n_smooth = getattr(bd.labels_m3, "smoothed", 0) if m == "m3" else 0
         env = make_env(cfg, render=render, is_eval=True, run_dir=out / m)
 

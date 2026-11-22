@@ -245,9 +245,21 @@ step for M2, every 10th for M3). The replay also records the ego state (s, d, v)
 trajectory in road coordinates, from which the labels are read.
 
 **2. M2 labels — the reference trajectory the human travelled.** At decision t the label is the human's lateral
-offset and speed `trajectory.horizon` = 2 s later: d* = d(t + 2 s), v* = v(t + 2 s) (clipped to 0–80 km/h). That is
-exactly the end point of the quintic M2 builds from (d*, v*), so the quintic reference runs from where the car is to
-where the human actually was 2 s later, and the PID (unchanged gains) tracks it. Encoded with `M2.encode`
+offset and speed 1 s later: d* = d(t + 1 s), v* = v(t + 1 s) (clipped to 0–80 km/h; `--m2-ahead-s`), with M2's
+quintic horizon `trajectory.horizon` = 1.5 s; the PID (unchanged gains) tracks it. Why these: M2 replans every
+0.5 s and flies only the start of each quintic, so the path it flies is a chain of quintic starts. Chaining them
+offline against the 17 human paths (perfect tracking; the PID tracks its reference to ~0.03 m rms in the sim):
+
+| lookahead L | horizon T | rms error | max | timing vs human |
+|---|---|---|---|---|
+| 2.0 s | 2.0 s (before) | 0.60 m | 3.0 m | 0.7 s early |
+| 1.0 s | 2.0 s | 0.31 m | 1.6 m | 0.3 s late |
+| **1.0 s** | **1.5 s** | **0.09 m** | **0.49 m** | **0.0 s** |
+| 0.75 s | 1.0 s | 0.04 m | 0.25 m | 0.0 s |
+
+The flown path matches the human's when L ≈ 0.7 T. T 1.0 fits slightly better but lets the RL command a lane change
+at ~20 m/s² lateral; 1.5 s peaks at ~9 m/s² (M3's limit is 9.3). With 2 s / 2 s M2 changed lanes ~1 s before the
+human and sideswiped the cars the human had waited for (sim: 1 of 8 drives succeeded). Encoded with `M2.encode`
 (d* over [right edge − 1 m, left edge + 1 m], v* over [0, v_cap]). 17 drives → 1,652 samples, mean v* 75 km/h.
 
 **3. M3 labels — the human path, sampled into waypoints.** At decision t:

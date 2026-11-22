@@ -8,7 +8,11 @@ method:
   decision_period: 5           # N2 control steps (0.5 s)
   lateral_margin: 1.0          # d* range = [d_min - margin, d_max + margin]  (NOT clipped)
   trajectory:
-    horizon: 2.0               # T_traj (s)
+    horizon: 1.5               # T_traj (s). Was 2.0. With replanning every 0.5 s the flown path matches a target
+                               # path when the target is read ~0.7 T ahead; T 1.5 + human labels 1 s ahead reproduce
+                               # the human drives to 0.09 m rms, no timing offset (T 2 / 2 s: 0.60 m, 0.7 s early ->
+                               # sideswipes). A full lane change in 1.5 s peaks ~9 m/s^2 (M3 limit 9.3); T 1.0 would
+                               # let the RL ask for ~20 m/s^2
     dt: 0.1
     accel_limit: 2.0           # speed-profile acceleration limit (m/s^2)
     decel_limit: 4.0           # speed-profile deceleration limit (m/s^2)

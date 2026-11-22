@@ -17,8 +17,10 @@ MetaDrive builds the BEV every control step whatever the method), so one replay 
 Labels (docs/human-data-pipeline.md, "Converting human drives into M2 / M3 actions"):
   M1  every control step: [steering, target accel / accel_range] - the logged command through the actuation table
       (+1 = full throttle = +2.9 m/s^2 in both; brakes beyond -accel_range[0] clip to -1).
-  M2  every decision (0.5 s): hindsight (d*, v*) = the human's lateral offset and speed method.trajectory.horizon
-      (2 s) later, i.e. the end point of the quintic M2 would plan, which its PID then tracks.
+  M2  every decision (0.5 s): hindsight (d*, v*) = the human's lateral offset and speed --m2-ahead-s (1 s) later;
+      the quintic (trajectory.horizon 1.5 s) + PID then reproduce the human path to ~0.09 m rms with no timing
+      offset (offline sweep over the 17 drives: the flown path matches when the target is read ~0.7 x horizon
+      ahead; 2 s ahead with a 2 s horizon ran 0.7 s early and sideswiped the cars the human waited for).
   M3  every decision (1 s): 5 waypoints on the human's future path, spaced by the human's speed x --m3-spacing-s
       (default 2 s, clipped to method.ds_range: ~36-40 m at 77 km/h -> ~180 m / ~8 s ahead; 1 s = ~20 m spacing
       follows the human path less closely after smoothing: 90 % within 2.7 m vs 1.8 m), all slots used (k = 5); v* = the
@@ -117,7 +119,8 @@ def labels_m1(r, cfg, method, args):
 def labels_m2(r, cfg, method, args):
     """Hindsight (d*, v*): where the human is method.trajectory.horizon after each decision."""
     st, n, P = r["state"], len(r["raw"]), method.period
-    H = int(round(float(cfg["method"]["trajectory"]["horizon"]) / float(cfg["sim"]["control_dt"])))
+    ahead = getattr(args, "m2_ahead_s", None) or 1.0
+    H = int(round(ahead / float(cfg["sim"]["control_dt"])))
     v_cap = method.env.v_cap
     idx, act, phys, flags = [], [], [], []
     for t in range(0, n, P):
@@ -194,6 +197,8 @@ def main():
     p.add_argument("--out", default=None, help="default runs/demos/<method>.npz")
     p.add_argument("--m3-spacing-s", type=float, default=2.0,
                    help="M3 waypoint spacing = human speed x this (s), clipped to method.ds_range")
+    p.add_argument("--m2-ahead-s", type=float, default=1.0,
+                   help="M2 d*, v* = the human's offset / speed this far ahead (s); ~0.7 x trajectory.horizon")
     p.add_argument("--m3-speed-ahead-s", type=float, default=3.0,
                    help="M3 v* = the human's highest speed over this many seconds ahead")
     p.add_argument("--m3-infeasible", choices=["smooth", "drop"], default="smooth",

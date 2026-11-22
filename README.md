@@ -11,7 +11,8 @@ same reward.
 |---|---|
 | [docs/DESIGN.md](docs/DESIGN.md) | how the simulator, methods and logging work |
 | [docs/TRAINING.md](docs/TRAINING.md) | reward, PPO settings and why, pilot results, Great Lakes workflow |
-| [docs/human-data-pipeline.md](docs/human-data-pipeline.md) | human driving demos -> behaviour cloning -> PPO warm start (M1) |
+| [docs/human-data-pipeline.md](docs/human-data-pipeline.md) | human driving demos -> behaviour cloning -> PPO warm start (M1, M2, M3) |
+| [docs/m2-reference-timing.md](docs/m2-reference-timing.md) | why M2's label lookahead must match its quintic horizon (L ≈ 0.7 T) |
 | [docs/SPEC_v2.md](docs/SPEC_v2.md) | original course specification (historical) |
 
 ## Setup (dev machine)

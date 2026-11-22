@@ -12,7 +12,10 @@ same reward.
 | [docs/DESIGN.md](docs/DESIGN.md) | how the simulator, methods and logging work |
 | [docs/TRAINING.md](docs/TRAINING.md) | reward, PPO settings and why, pilot results, Great Lakes workflow |
 | [docs/human-data-pipeline.md](docs/human-data-pipeline.md) | human driving demos -> behaviour cloning -> PPO warm start (M1, M2, M3) |
+| [docs/warm-start.md](docs/warm-start.md) | how the warm start works: demos -> relabelled dataset -> clone -> PPO (actor copy, critic warm-up) |
 | [docs/m2-reference-timing.md](docs/m2-reference-timing.md) | why M2's label lookahead must match its quintic horizon (L ≈ 0.7 T) |
+| [docs/m3-mpc-lessons.md](docs/m3-mpc-lessons.md) | M3 corridor + MPC: soft constraints, solver warm starts, space-time corridor rules |
+| [docs/rl-lessons.md](docs/rl-lessons.md) | RL training lessons: update size, eval noise, action bias, reward ordering, memory, warm starts |
 | [docs/SPEC_v2.md](docs/SPEC_v2.md) | original course specification (historical) |
 
 ## Setup (dev machine)

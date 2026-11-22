@@ -44,7 +44,7 @@ def main():
     p.add_argument("--no-render", action="store_true")
     p.add_argument("--fps", type=float, default=10.0, help="10 = real time, 0 = as fast as possible")
     p.add_argument("--m3-spacing-s", type=float, default=2.0)
-    p.add_argument("--m2-ahead-s", type=float, default=1.0, help="M2 label lookahead (s)")
+    p.add_argument("--m2-ahead-s", type=float, default=1.3, help="M2 label lookahead (s)")
     p.add_argument("--set", dest="overrides", action="append", default=[], metavar="KEY=VALUE",
                    help="config overrides for the M2 / M3 runs")
     p.add_argument("--out", default=None)

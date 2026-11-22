@@ -245,8 +245,8 @@ step for M2, every 10th for M3). The replay also records the ego state (s, d, v)
 trajectory in road coordinates, from which the labels are read.
 
 **2. M2 labels — the reference trajectory the human travelled.** At decision t the label is the human's lateral
-offset and speed 1 s later: d* = d(t + 1 s), v* = v(t + 1 s) (clipped to 0–80 km/h; `--m2-ahead-s`), with M2's
-quintic horizon `trajectory.horizon` = 1.5 s; the PID (unchanged gains) tracks it. Why these: M2 replans every
+offset and speed 1.3 s later: d* = d(t + 1.3 s), v* = v(t + 1.3 s) (clipped to 0–80 km/h; `--m2-ahead-s`), with
+M2's quintic horizon `trajectory.horizon` = 2 s (unchanged); the PID (unchanged gains) tracks it. Why these: M2 replans every
 0.5 s and flies only the start of each quintic, so the path it flies is a chain of quintic starts. Chaining them
 offline against the 17 human paths (perfect tracking; the PID tracks its reference to ~0.03 m rms in the sim):
 
@@ -254,11 +254,14 @@ offline against the 17 human paths (perfect tracking; the PID tracks its referen
 |---|---|---|---|---|
 | 2.0 s | 2.0 s (before) | 0.60 m | 3.0 m | 0.7 s early |
 | 1.0 s | 2.0 s | 0.31 m | 1.6 m | 0.3 s late |
-| **1.0 s** | **1.5 s** | **0.09 m** | **0.49 m** | **0.0 s** |
+| 1.0 s | 1.5 s | 0.09 m | 0.49 m | 0.0 s |
+| **1.3 s** | **2.0 s** (used) | **0.14 m** | **0.76 m** | **0.0 s** |
 | 0.75 s | 1.0 s | 0.04 m | 0.25 m | 0.0 s |
 
-The flown path matches the human's when L ≈ 0.7 T. T 1.0 fits slightly better but lets the RL command a lane change
-at ~20 m/s² lateral; 1.5 s peaks at ~9 m/s² (M3's limit is 9.3). With 2 s / 2 s M2 changed lanes ~1 s before the
+The flown path matches the human's when L ≈ 0.65–0.7 T. Shorter horizons fit better but let the RL command sharper
+moves: a one-lane step peaks at ~9 m/s² with T 1.5 s, at MetaDrive's grip, and `validate.py check m2` (instant lane
+steps) failed there (PID 1.6 m off track, off the road); T 2 s peaks at ~5 m/s² and passes. See
+docs/m2-reference-timing.md. With 2 s / 2 s M2 changed lanes ~1 s before the
 human and sideswiped the cars the human had waited for (sim: 1 of 8 drives succeeded). Encoded with `M2.encode`
 (d* over [right edge − 1 m, left edge + 1 m], v* over [0, v_cap]). 17 drives → 1,652 samples, mean v* 75 km/h.
 

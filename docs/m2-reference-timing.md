@@ -1,8 +1,10 @@
 # M2's reference: why the label lookahead has to match the quintic horizon
 
-Notes from 2026-11-21. Change: `configs/m2.yaml` `trajectory.horizon` 2.0 → **1.5 s**; human-demo labels read the
-human **1 s** ahead (`scripts/build_demos.py --m2-ahead-s`, default 1.0). Result: M2 flying the human's own labels
-went from sideswiping traffic on almost every drive to following the human's path.
+Notes from 2026-11-21. Change: human-demo labels for M2 read the human **1.3 s** ahead instead of 2 s
+(`scripts/build_demos.py --m2-ahead-s`, default 1.3), matched to M2's unchanged quintic horizon `trajectory.horizon`
+= 2 s. Result: M2 flying the human's own labels goes from 0.60 m rms / 0.7 s early (sideswiping traffic on almost
+every drive) to 0.14 m rms with no timing offset. (A 1.5 s horizon with 1 s labels fit even better, 0.09 m, but
+failed the step-response check: see section 4.)
 
 ## 1. How M2 turns (d\*, v\*) into motion
 
@@ -62,7 +64,8 @@ recorded human path, and compare with the human's d(t).
 |---|---|---|---|---|
 | 2.0 s | 2.0 s (old) | 0.60 m | 3.0 m | 0.7 s early |
 | 1.0 s | 2.0 s | 0.31 m | 1.6 m | 0.3 s late |
-| **1.0 s** | **1.5 s** (new) | **0.09 m** | **0.49 m** | **0.0 s** |
+| 1.0 s | 1.5 s | 0.09 m | 0.49 m | 0.0 s |
+| **1.3 s** | **2.0 s** (used) | **0.14 m** | **0.76 m** | **0.0 s** |
 | 0.75 s | 1.0 s | 0.04 m | 0.25 m | 0.0 s |
 | 0.5 s | 0.6 s | 0.07 m | 0.54 m | +0.1 s |
 
@@ -73,7 +76,7 @@ traffic): with 2 s / 2 s, 1 of the first 8 drives succeeded. Every collision was
 change** — the other car level with M2 (Δs −5…+1 m) one car width over (Δd ≈ 2 m) — with M2 ~1 m further into the
 lane change than the human at the same point. Keyboard drivers often wait for a slower car to clear and then cut
 across late; M2, a second early, moved over while that car was still alongside. The PID tracked its reference to
-≤ 0.18 m throughout: the controller was doing exactly what the labels asked. With 1 s / 1.5 s it is clearly better.
+≤ 0.18 m throughout: the controller was doing exactly what the labels asked. With 1 s labels it was clearly better (your sweep).
 
 ## 4. Why not make T as short as possible
 
@@ -82,22 +85,26 @@ acceleration (in m/s², for d in m along time). For a full lane change, Δd = 3.
 
 | T | peak lateral acceleration |
 |---|---|
-| 2.0 s | ~5 m/s² |
-| **1.5 s** | **~9 m/s²** — about MetaDrive's grip (wheel_friction 0.9 → ~8.8) and M3's `max_lat_accel` 9.3 |
-| 1.0 s | ~20 m/s² — beyond grip: the PID could not track it, and an RL exploring random d\* would skid |
+| **2.0 s** | **~5 m/s²** (used) |
+| 1.5 s | ~9 m/s² — at MetaDrive's grip (wheel_friction 0.9 → ~8.8) |
+| 1.0 s | ~20 m/s² — beyond grip |
 
-1.5 s is the shortest horizon that stays within grip; 1 s lookahead is its matching label.
+Tried first: T = 1.5 s with 1 s labels (best fit, 0.09 m). `validate.py check m2` steps d\* by a whole lane at
+60 km/h — exactly what an exploring RL does — and at T = 1.5 s the PID overshot 1.6 m and left the road (tolerance
+1.0 m). The human labels never step (they move d\* gradually), so the demo looked fine; the RL would not be. Kept
+T = 2 s and moved the label instead: 1.3 s ≈ the zero-offset lookahead for T = 2 (1.26 s), 0.14 m rms. Lesson: a
+representation has to fit the data AND survive the actions the learner will try.
 
 ## 5. What it means for the RL and the warm start
 
-* M2's lateral action now has a physical meaning: **"where I want to be laterally ~1 s from now."**
+* M2's lateral action has a physical meaning: **"where I want to be laterally ~1.3 s from now."**
 * The human labels are in that same frame, so the clone learns targets the controller can reproduce and PPO
   fine-tunes the same quantity.
 * M2's speed channel is a different mechanism (acceleration-limited profile, not a quintic). The 1 s lookahead was
   chosen for the lateral fit; if M2's speed trace drifts from the human's while the lateral path matches, revisit
   v\* separately.
-* Runs trained with T = 2 s (before this change) are not comparable with runs at T = 1.5 s: the same d\* produces a
-  different motion. Re-run the from-scratch M2 baseline with the new horizon.
+* M2's controller is unchanged (T = 2 s), so from-scratch M2 runs before and after this change are comparable; only
+  the M2 clone (labels) changed.
 
 ## 6. The same lesson elsewhere
 

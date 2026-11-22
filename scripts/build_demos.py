@@ -17,8 +17,8 @@ MetaDrive builds the BEV every control step whatever the method), so one replay 
 Labels (docs/human-data-pipeline.md, "Converting human drives into M2 / M3 actions"):
   M1  every control step: [steering, target accel / accel_range] - the logged command through the actuation table
       (+1 = full throttle = +2.9 m/s^2 in both; brakes beyond -accel_range[0] clip to -1).
-  M2  every decision (0.5 s): hindsight (d*, v*) = the human's lateral offset and speed --m2-ahead-s (1 s) later;
-      the quintic (trajectory.horizon 1.5 s) + PID then reproduce the human path to ~0.09 m rms with no timing
+  M2  every decision (0.5 s): hindsight (d*, v*) = the human's lateral offset and speed --m2-ahead-s (1.3 s) later;
+      the quintic (trajectory.horizon 2 s) + PID then reproduce the human path to ~0.14 m rms with no timing
       offset (offline sweep over the 17 drives: the flown path matches when the target is read ~0.7 x horizon
       ahead; 2 s ahead with a 2 s horizon ran 0.7 s early and sideswiped the cars the human waited for).
   M3  every decision (1 s): 5 waypoints on the human's future path, spaced by the human's speed x --m3-spacing-s
@@ -119,7 +119,7 @@ def labels_m1(r, cfg, method, args):
 def labels_m2(r, cfg, method, args):
     """Hindsight (d*, v*): where the human is method.trajectory.horizon after each decision."""
     st, n, P = r["state"], len(r["raw"]), method.period
-    ahead = getattr(args, "m2_ahead_s", None) or 1.0
+    ahead = getattr(args, "m2_ahead_s", None) or 1.3
     H = int(round(ahead / float(cfg["sim"]["control_dt"])))
     v_cap = method.env.v_cap
     idx, act, phys, flags = [], [], [], []
@@ -197,7 +197,7 @@ def main():
     p.add_argument("--out", default=None, help="default runs/demos/<method>.npz")
     p.add_argument("--m3-spacing-s", type=float, default=2.0,
                    help="M3 waypoint spacing = human speed x this (s), clipped to method.ds_range")
-    p.add_argument("--m2-ahead-s", type=float, default=1.0,
+    p.add_argument("--m2-ahead-s", type=float, default=1.3,
                    help="M2 d*, v* = the human's offset / speed this far ahead (s); ~0.7 x trajectory.horizon")
     p.add_argument("--m3-speed-ahead-s", type=float, default=3.0,
                    help="M3 v* = the human's highest speed over this many seconds ahead")

@@ -42,8 +42,9 @@
               5 m ahead) are flagged but flown: the run goes on and the car reaches the lane; a solver that
               keeps failing replays its plan, then holds speed and lane (never brakes or ends the run) and
               recovers once the solver works
-   lanes      M2 / M3 lane commands: LEFT reaches lane 0, commands mid lane change are ignored, edges saturate,
-              the observation's target_lane feature; a car placed ahead shows up in the lane features
+   lanes      M2 / M3 [lane command, speed level] actions: LEFT reaches lane 0, commands mid lane change are
+              ignored, edges saturate, the observation's target_lane feature; a car placed ahead shows up in the
+              lane features
    smoke      M1 / M2 / M3 complete random-action episodes; logs consistent (terms, returns, decision counts)
    b0         B0 completes every evaluation seed through the evaluator
    train      PPO entry point end to end for a few hundred control steps per method (plumbing, not learning)
@@ -435,7 +436,8 @@ def check_env() -> dict:
 
     cfg = load_config("m3")              # determinism: same seed + actions -> identical trajectory
     env = make_env(cfg, is_eval=True)
-    actions = np.random.default_rng(1).integers(0, 3, 25)    # random lane commands
+    env.action_space.seed(1)
+    actions = [env.action_space.sample() for _ in range(25)]   # random [lane command, speed level]
     trajs = []
     for _ in range(2):
         env.reset(options={"episode_seed": cfg["scenario"]["seeds"]["eval"][3]})
@@ -623,8 +625,11 @@ def check_lanes() -> dict:
         env = controlled_env(method, ego_lane=1, ego_kmh=70.0, label=f"lanes: {method} LEFT, then RIGHT x2")
         obs, _ = env.reset(options={"episode_seed": 0})
         L = env.road.lane_centers
-        keep = [0, 0] if method == "m2" else 0
-        cmd = (lambda c: [c, 0]) if method == "m2" else (lambda c: c)
+        keep = [0, 0]                                           # keep lane, hold speed (M2 and M3 share the action)
+
+        def cmd(c):
+            return [c, 0]
+
         i_tl = EGO_FEATURES.index("target_lane")
         obs, _, te, tr, _ = env.step(cmd(LEFT))
         target_feature = float(obs["ego"][i_tl])                # mid lane change: target is one lane to the left

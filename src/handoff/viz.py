@@ -74,8 +74,10 @@ def overlay(env, diag: dict) -> tuple[list, list, dict]:
         cmd = int(dec["vector"][0])
         text["RL lane command"] = (("keep", "LEFT", "RIGHT")[cmd]
                                    + ("  (ignored: changing lanes)" if cmd and method.lane.changing(ego, road) else ""))
+        sc = dec.get("speed_cmd")
         text["target lane / v*"] = (f"{dec.get('lane', '-')} (d {dec['d_target']:+.1f} m) / "
-                                    f"{dec['v_target'] * 3.6:4.0f} km/h")
+                                    f"{dec['v_target'] * 3.6:4.0f} km/h"
+                                    + ("" if sc is None else f"  ({('hold', '+10', '-10')[sc]})"))
     if name == "m3" and dec:
         gated = bool(diag.get("gated_brake"))
         text["plan lateral accel"] = (f"{dec['lat_accel']:4.1f} m/s2" + ("" if dec["feasible"] else
@@ -220,8 +222,8 @@ def live(cfg: dict, checkpoint, seeds: list[int], out_dir: Path, render: bool = 
     from handoff.env import make_env
     from handoff.evaluate import load_policy_fn
 
+    policy = load_policy_fn(checkpoint, deterministic, cfg)      # checked before the window opens
     env = make_env(cfg, render=render, is_eval=True, run_dir=out_dir)
-    policy = load_policy_fn(checkpoint, deterministic)
     act = policy or (lambda obs: np.zeros(env.action_space.shape, np.float32))
     viewer = Viewer(fps=fps) if render else None
     summaries = []
@@ -245,8 +247,8 @@ def replay(cfg: dict, episode_npz: str, checkpoint, tolerance: float = 0.5) -> d
 
     ep = load_episode(episode_npz)
     xs, ys = ep["data"]["step_x"], ep["data"]["step_y"]
+    policy = load_policy_fn(checkpoint, cfg=cfg)
     env = make_env(cfg, render=True, is_eval=True)
-    policy = load_policy_fn(checkpoint)
     act = policy or (lambda obs: np.zeros(env.action_space.shape, np.float32))
     viewer = Viewer()
     state = {"i": 0, "max_dev": 0.0}

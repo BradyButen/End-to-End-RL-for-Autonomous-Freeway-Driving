@@ -1,6 +1,6 @@
-"""What M2 and M3 share: the RL's lane choice (``LaneTarget``), the reference path their controllers track (M2:
-quintic trajectory in time; M3: ``LanePlan``, a quintic in arc length, or a waypoint spline in validation), and the
-quintic polynomial both are built from. Pure numpy."""
+"""What M2 and M3 share: the RL's lane and speed choice (``LaneTarget``, ``SpeedTarget``), the reference path their
+controllers track (M2: quintic trajectory in time; M3: ``LanePlan``, a quintic in arc length, or a waypoint spline in
+validation), and the quintic polynomial both are built from. Pure numpy."""
 
 from __future__ import annotations
 
@@ -61,8 +61,31 @@ def eval_quintic(c: np.ndarray, t: np.ndarray, T: float):
     return d, np.where(beyond, 0.0, dd), np.where(beyond, 0.0, ddd)
 
 
-# ======================================================================================= lane choice (M2, M3)
+# ======================================================================================= lane + speed choice (M2, M3)
 KEEP, LEFT, RIGHT = 0, 1, 2     # the RL's lateral command; KEEP is index 0, the default action
+HOLD, FASTER, SLOWER = 0, 1, 2  # the RL's speed command; HOLD is index 0, the default action
+
+
+class SpeedTarget:
+    """The target speed the RL moves with relative commands (configs/base.yaml ``lane_action``): FASTER / SLOWER
+    change it by ``speed_step_km_h``, HOLD keeps it, within [0, v_cap]. Sticky: a target persists until changed, so
+    the policy commits to a speed (an absolute speed level redrawn every decision let M2 dither between levels and
+    average to traffic speed, which only worked while actions were sampled). Starts at the ego's speed on reset."""
+
+    def __init__(self, cfg: dict, v_cap: float):
+        self.step = float(cfg["speed_step_km_h"]) / 3.6
+        self.v_cap = float(v_cap)
+        self.v = 0.0
+
+    def reset(self, ego) -> None:
+        self.v = float(np.clip(round(float(ego.v) / self.step) * self.step, 0.0, self.v_cap))
+
+    def update(self, cmd: int) -> float:
+        if cmd == FASTER:
+            self.v = min(self.v + self.step, self.v_cap)
+        elif cmd == SLOWER:
+            self.v = max(self.v - self.step, 0.0)
+        return self.v
 
 
 class LaneTarget:

@@ -6,7 +6,7 @@ System design: [DESIGN.md](DESIGN.md).
 ## 1. Algorithm
 PPO (Stable-Baselines3, `MultiInputPolicy`: the `ego` and `lanes` observation vectors concatenated into separate
 256-256 policy and value MLPs), identical for M1/M2/M3. M1's action is continuous (Gaussian policy); M2's and M3's
-are discrete (categorical: lane command, M2 also a speed level). Budgets and cadences are counted in **control steps** (0.1 s of simulated driving),
+are discrete (categorical: lane command and a relative speed command). Budgets and cadences are counted in **control steps** (0.1 s of simulated driving),
 summed over parallel envs, so every method gets the same simulated experience (D-07).
 
 ## 2. Reward: `r5` (the only reward)
@@ -52,7 +52,7 @@ Base (`configs/base.yaml`) unless a method overrides it (`configs/m1.yaml`, `m2.
 | `batch_size` / `n_epochs` / `target_kl` | M1 512 / 4 / 0.03; M2, M3 256 / 4 / 0.03 | **Update guard.** Each PPO update makes `n_epochs` passes over the last rollout; approx_kl measures how far that moves the policy's action distribution. Small moves keep the rollout data valid for the new policy; large ones step into untested territory, the policy gets worse, collects worse data, and spirals. `target_kl` stops an update's passes early once approx_kl exceeds it; fewer epochs and (M2) a smaller learning rate keep each step small. Healthy: approx_kl < ~0.02, clip fraction 0.1–0.2. Evidence: M1 pilot approx_kl 0.01 → 0.23 (guard added; round 3 stayed ~0.01); M2 round 3 approx_kl 0.006 → 0.55, clip fraction 0.66, eval success 1.0 → 0 after 1.2M steps (M2 also collapsed in round 2); M3 round 2 ~0.05 / 0.4–0.49 without collapsing. |
 | network | `net_arch` [256, 256], separate actor / critic | batches 1–5 shared a NatureCNN on the BEV between actor and critic; M1's critic never learned (explained variance ~0 for 6M steps) |
 | M1 exploration | `init_log_std` [−1.9, −0.7] → std [0.15, 0.5] = [1.2 m/s² lateral, ~1.5 m/s² accel] | per dimension, in physical units (`rl-lessons.md` §13). Warm M1 at one std 0.135 never braked (0.4 % of steps) and its steering noise asked for ~19 m/s² at 80 km/h. SB3's default std 1 clips ~32 % of samples. |
-| M2 / M3 exploration | `init_default_prob` KEEP 0.95 (M2) / 0.9 (M3), M2 speed level 80 km/h 0.8 | categorical policies start uniform; that would change lanes on 2 of 3 decisions and pick a random speed. The bias starts them at "keep lane, 80 km/h" with occasional alternatives |
+| M2 / M3 exploration | `init_default_prob` KEEP 0.95 (M2) / 0.9 (M3), HOLD speed 0.8 | categorical policies start uniform; that would change lanes on 2 of 3 decisions and move the target speed every decision. The bias starts them at "keep lane, hold speed" with occasional alternatives (faster and slower equally likely, so no drift) |
 | `ent_coef` | M1 0; M2, M3 0.01 | M1: exploration is set by its std; an entropy bonus would push it back up. Discrete: a small bonus keeps lane changes in play (warm batches collapsed to a constant plan) |
 | reward normalisation | on (`VecNormalize`, rewards only), clip ±100 | **new.** Returns span −500…+105; normalising by the running return std keeps the value loss from swamping the policy loss (pilot explained variance ≈ 0.5). Clip raised from SB3's 10 so the crash penalty is not clipped early in training. Logs and eval stay raw. |
 | `learning_rate`, `clip_range` | 3e-4 (M2 1e-4), 0.2 | SB3 defaults; M2 lowered with the update guard |
@@ -92,8 +92,9 @@ Open problems for the next attempt:
   (`docs/rl-lessons.md` §11–12).
 
 ### Batch 6 changes (2026-11-23): fixes 1–3, bundled, then reward r5 + γ 0.998
-1. **M2 / M3 decide lanes** (DESIGN §4): discrete keep / left / right, run to completion; M2 adds a speed level,
-   M3's MPC owns speed (toward 80 km/h) and braking. Exploring a pass in M3 no longer risks a crash; the default
+1. **M2 / M3 decide lanes and a speed** (DESIGN §4): the same discrete action, [keep / left / right,
+   hold / +10 / −10 km/h on a sticky target speed]; a lane change runs to completion. M2's PID tracks the speed; for M3 it is the MPC's ceiling and the
+   MPC owns the trajectory and braking. Exploring a pass in M3 no longer risks a crash; the default
    action is "keep lane, 80 km/h", not 40 / 50 km/h. When fed human lane plans the controllers already drove
    70–77 km/h, so the bottleneck was the decisions.
 2. **Ground-truth lane observation** out to 100 m (DESIGN §3), separate actor / critic MLPs.

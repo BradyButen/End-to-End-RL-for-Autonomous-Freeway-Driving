@@ -34,13 +34,35 @@ def sb3_policy_fn(policy, deterministic: bool = True) -> Callable[[dict], np.nda
     return lambda obs: policy.predict(obs, deterministic=deterministic)[0]
 
 
-def load_policy_fn(checkpoint: str | Path | None, deterministic: bool = True):
-    """SB3 checkpoint -> policy function (None -> None, for B0)."""
+def load_policy_fn(checkpoint: str | Path | None, deterministic: bool = True, cfg: dict | None = None):
+    """SB3 checkpoint -> policy function (None -> None, for B0). With ``cfg``, the checkpoint must have been trained
+    with this code's observation and action spaces for that method (checked before any simulator starts)."""
     if checkpoint is None:
         return None
     from stable_baselines3 import PPO
 
-    return sb3_policy_fn(PPO.load(str(checkpoint), device="cpu").policy, deterministic)
+    model = PPO.load(str(checkpoint), device="cpu")
+    if cfg is not None:
+        check_spaces(model, cfg, checkpoint)
+    return sb3_policy_fn(model.policy, deterministic)
+
+
+def check_spaces(model, cfg: dict, checkpoint) -> None:
+    """Raise a clear error when a checkpoint's observation / action spaces differ from today's for its method
+    (trained on an older version of the code: it cannot drive in the current env)."""
+    from handoff.env import method_class, observation_space
+
+    want_obs = observation_space(cfg)
+    want_act = method_class(cfg["method"]["name"]).ACTION_SPACE
+    bad = []
+    if model.observation_space != want_obs:
+        bad.append(f"observation {model.observation_space} != current {want_obs}")
+    if want_act is not None and model.action_space != want_act:
+        bad.append(f"action {model.action_space} != current {want_act}")
+    if bad:
+        raise SystemExit(f"{checkpoint} was trained with an older version of the code and cannot run in the current "
+                         f"env ({'; '.join(bad)}). Its logged episodes can still be plotted: "
+                         "python scripts/plot.py episode <run>/episodes/<id>.npz")
 
 
 def _const_lr(_progress):   # picklable stand-in for SB3's lr schedule (unused at inference)

@@ -1,5 +1,5 @@
-# M3: RL picks a lane command every 1 s (KEEP / LEFT / RIGHT); lane plan -> road corridor -> MPC, which owns speed
-# (toward v_cap) and braking for cars; the emergency-brake gate is off (src/handoff/m3.py, src/handoff/mpc.py).
+# M3: RL picks [lane command, speed command on the max speed] every 1 s; lane plan -> road corridor -> MPC, which drives up to the max speed
+# and brakes for cars; the emergency-brake gate is off (src/handoff/m3.py, src/handoff/mpc.py).
 experiment:
   method: m3
 
@@ -75,7 +75,8 @@ method:
 training:                      # 7 h of training (M3's final eval takes longer); the wall clock is the real stop
   total_control_steps: 10000000
   max_wall_minutes: 420
-  init_default_prob: 0.9       # keep lane; a lane change tried every ~10 s at first
+  init_default_prob: [0.9, 0.8]   # [keep lane, hold speed]: a lane change tried every ~10 s, the max speed moved
+                               # +-10 km/h on 20 % of decisions (equally often up and down), at first
 
 ppo:
   n_steps: 128                 # decisions per env per rollout (= 128 s of driving, same as M1 / M2)

@@ -56,9 +56,12 @@ observation:                # ground truth, the same for every method (src/hando
                             # 100 m = 9 s of warning closing at 40 km/h; the BEV image used before (batches 1-5)
                             # reached 50 m at 1.2 m per pixel
 
-lane_action:                # M2 / M3 lateral command (src/handoff/reference.py LaneTarget)
+lane_action:                # M2 / M3 action: [lane command, speed command] (src/handoff/reference.py LaneTarget,
+                            # SpeedTarget): [keep / left / right, hold / faster / slower]; [0, 0] = keep both
   settle: 0.5               # m: a lane change is "in progress" (new commands ignored) until the ego is this close
                             # to the target lane's centre
+  speed_step_km_h: 10       # faster / slower change the target speed by this; it starts at the spawn speed and
+                            # persists. M2: the speed the PID tracks. M3: the MPC's ceiling (it brakes below it for cars)
 
 # Actuation mapping a [m/s^2] <-> throttle_brake (M2 speed feed-forward, M3 MPC; no system identification).
 # Static lookup table measured once with scripts/calibrate_actuation.py (open-loop full/partial

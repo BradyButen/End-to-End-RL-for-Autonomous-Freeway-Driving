@@ -1,4 +1,4 @@
-# M2: RL picks [lane command, speed level] every 0.5 s; quintic lateral to the target lane + accel-limited speed
+# M2: RL picks [lane command, speed command] every 0.5 s; quintic lateral to the target lane + accel-limited speed
 # profile; cascaded PID tracks it. No safety layer: braking for cars is the RL's job (src/handoff/m2.py).
 experiment:
   method: m2
@@ -6,7 +6,6 @@ experiment:
 method:
   name: m2
   decision_period: 5           # N2 control steps (0.5 s)
-  speeds_km_h: [80, 70, 60, 50, 40, 30, 20, 0]   # speed levels; index 0 (v_cap) is the default action
   trajectory:
     horizon: 2.0               # T_traj (s). With replanning every 0.5 s the flown path follows a target path when
                                # the target is read ~0.65 T ahead: human labels 1.3 s ahead reproduce the human drives
@@ -28,8 +27,8 @@ method:
 training:                      # 7.5 h job: the wall clock (450 min) is the stop; budget above what it can reach
   total_control_steps: 20000000
   max_wall_minutes: 450
-  init_default_prob: [0.95, 0.8]   # [keep lane, 80 km/h]: a lane change tried every ~10 s, a lower speed level
-                               # on 20 % of decisions (0.5 s each), at first
+  init_default_prob: [0.95, 0.8]   # [keep lane, hold speed]: a lane change tried every ~10 s, the target speed
+                               # moved +-10 km/h on 20 % of decisions (equally often up and down), at first
 
 ppo:                           # round 2: more updates per control step (pilot: ~14 updates in 2M steps)
   n_steps: 256                 # decisions per env per rollout (= 128 s of driving, same as M1/M3)

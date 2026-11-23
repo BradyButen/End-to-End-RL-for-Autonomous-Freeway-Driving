@@ -9,12 +9,16 @@ One RL step = one decision:
         if the episode ended: break
     return obs, reward summed over the decision, ...
 
-Same observation and reward for every method:
+Same world observation and reward for every method:
   * obs (ground truth, like a tracking stack's output; ``observation_space``):
-      "ego":   EGO_FEATURES (speed, position in the road and in the lane, heading error, last commands, the target
-               lane relative to the current one (M2 / M3 lane changes in progress, 0 for M1), time left)
+      "ego":   EGO_FEATURES (speed, position in the road and in the lane, heading error, last applied steering /
+               throttle, target lane relative to the current one (M2 / M3 lane change in progress; 0 for M1), time
+               left): every method, unchanged since data/bc/m1_clone.zip was built (do not reorder or extend it:
+               M1's clone would no longer fit)
       "lanes": for the lanes left of / at / right of the ego: exists, then the nearest car ahead and behind in that
-               lane (LANE_SLOT each), out to observation.range (100 m)
+               lane (LANE_SLOT each), out to observation.range (100 m): every method
+      "cmd":   extra command state of a method, ``Method.COMMAND_FEATURES`` (M2 / M3: the target speed); absent for
+               M1 / B0, so M2 / M3 additions go here and never change M1's inputs
   * reward = reward.py (configs/r5.yaml by default), summed undiscounted over the decision's control steps.
 
 A method is a small class (m1.py, m2.py, m3.py) with ``period``, ``action_space``, ``reset()``, ``decide(action)``
@@ -55,7 +59,7 @@ EGO_FEATURES = (
     "steering",        # last applied steering command
     "throttle_brake",  # last applied throttle / brake command
     "target_lane",     # target lane - current lane, in lanes (+ left); M2 / M3 mid lane change, M1 always 0
-    "t_left",          # time left / episode cap (sim.horizon): with a ~50 s discount the value depends on it
+    "t_left",          # time left / episode cap (sim.horizon): with a long discount the value depends on it
 )
 LANE_SLOT = (          # the nearest car ahead (or behind) in one lane
     "present",         # 1 = a car, 0 = none within range (then: gap 1, dd the lane's offset, dv 0, inv_ttc 0)
@@ -69,12 +73,14 @@ LANE_OVERLAP = 0.3     # m: a car occupies a lane when it reaches this far into 
 
 
 def observation_space(cfg: dict) -> gym.spaces.Dict:
-    """The policy's observation space (also used by scripts/bc.py to build the same network)."""
+    """The policy's observation space for this config's method (also used by scripts/bc.py)."""
     n_lanes = len(LANES) * (1 + 2 * len(LANE_SLOT))
-    return gym.spaces.Dict({
-        "ego": gym.spaces.Box(-5.0, 5.0, shape=(len(EGO_FEATURES),), dtype=np.float32),
-        "lanes": gym.spaces.Box(-5.0, 5.0, shape=(n_lanes,), dtype=np.float32),
-    })
+    spaces = {"ego": gym.spaces.Box(-5.0, 5.0, shape=(len(EGO_FEATURES),), dtype=np.float32),
+              "lanes": gym.spaces.Box(-5.0, 5.0, shape=(n_lanes,), dtype=np.float32)}
+    n_cmd = len(method_class(cfg["method"]["name"]).COMMAND_FEATURES)
+    if n_cmd:
+        spaces["cmd"] = gym.spaces.Box(-5.0, 5.0, shape=(n_cmd,), dtype=np.float32)
+    return gym.spaces.Dict(spaces)
 
 
 def lane_features(ego: EgoState, objects: ObjectList, road: RoadFrame, radius: float, v_max: float) -> np.ndarray:
@@ -120,9 +126,17 @@ class Method:
         self.action_space = action_space
         self.reference = None     # what the controller tracks (M2 / M3), drawn by the viewer and logged
 
+    COMMAND_FEATURES: tuple = ()   # extra command state in the observation ("cmd"); none for M1 / B0
+    ACTION_SPACE: gym.Space | None = None   # the RL action space (class-level, so checkpoints can be checked without
+                                            # an env); None = not checked (B0)
+
     def target_lane_offset(self) -> int:
-        """Target lane - current lane (observation feature ``target_lane``); M2 / M3 override it."""
+        """Target lane - current lane (ego feature ``target_lane``); M2 / M3 override it, M1 / B0 0."""
         return 0
+
+    def command_state(self) -> list[float]:
+        """Values of COMMAND_FEATURES for the observation's "cmd" entry (M2 / M3)."""
+        return []
 
     @staticmethod
     def agent_policy():
@@ -343,8 +357,11 @@ class DrivingEnv(gym.Env):
                   "lane_offset": (e.d - nearest) / road.lane_width, "psi_err": e.psi_err, "steering": e.steering,
                   "throttle_brake": e.throttle_brake, "target_lane": float(self.method.target_lane_offset()),
                   "t_left": 1.0 - self.episode_control_steps / self.horizon_steps}
-        return {"ego": np.clip(np.asarray([values[f] for f in EGO_FEATURES], np.float32), -5.0, 5.0),
-                "lanes": np.clip(lane_features(e, self.seen, road, self.obs_range, self.v_max), -5.0, 5.0)}
+        obs = {"ego": np.clip(np.asarray([values[f] for f in EGO_FEATURES], np.float32), -5.0, 5.0),
+               "lanes": np.clip(lane_features(e, self.seen, road, self.obs_range, self.v_max), -5.0, 5.0)}
+        if self.method.COMMAND_FEATURES:
+            obs["cmd"] = np.clip(np.asarray(self.method.command_state(), np.float32), -5.0, 5.0)
+        return obs
 
 
 def make_env(cfg: dict, *, rank: int = 0, run_dir: str | Path | None = None, is_eval: bool = False,

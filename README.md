@@ -3,8 +3,8 @@
 Nav 565 Team 16 · freeway driving in [MetaDrive](https://github.com/metadriverse/metadrive).
 
 A ladder of RL authority on one freeway with 35–45 km/h traffic: **M1** RL drives end-to-end (lateral and
-longitudinal acceleration), **M2** RL picks a lane and a speed that a PID tracks, **M3** RL picks a lane and an MPC
-drives it (speed, braking, collision-free corridor), **B0** is MetaDrive's rule-based IDM. All RL is PPO
+longitudinal acceleration), **M2** RL picks a lane and a speed that a PID tracks, **M3** RL picks a lane and a max speed (both
+as keep / change commands) and an MPC drives it (trajectory, braking, collision-free corridor), **B0** is MetaDrive's rule-based IDM. All RL is PPO
 (Stable-Baselines3), same ground-truth observation (the nearest cars ahead / behind in each lane), same reward.
 
 | doc | contents |
@@ -59,8 +59,8 @@ src/handoff/
   env.py          DrivingEnv: the one Gym env (decision loop, ground-truth observation, reward, logging) + Method
   reward.py       reward terms (weights in configs/r5.yaml)
   m1.py           M1 end-to-end (lateral / longitudinal accel), B0 IDM baseline
-  m2.py           M2: [lane command, speed level] -> quintic reference -> cascaded PID
-  m3.py           M3: lane command -> lane plan -> road corridor -> MPC (soft corridor); waypoint spline (validation)
+  m2.py           M2: [lane command, speed command] -> quintic reference -> cascaded PID
+  m3.py           M3: [lane command, speed command] -> lane plan -> road corridor -> MPC; waypoint spline (validation)
   mpc.py          the CasADi MPC and its fallbacks
   reference.py    lane command (LaneTarget), M3's LanePlan, reference path type, quintic polynomial
   train.py        PPO training (callback, eval / checkpoint cadence, watchdog)

@@ -1,9 +1,10 @@
-"""M2 — RL + PID. Every 5 control steps (0.5 s) the RL picks a lane command and a speed:
+"""M2 — RL + PID. Every 5 control steps (0.5 s) the RL picks a lane command and a speed command:
 
-    action MultiDiscrete [3, n_speeds] = [lateral command, speed level]; [0, 0] = keep lane, 80 km/h (the default)
+    action MultiDiscrete [3, 3] = [lateral command, speed command]; [0, 0] = keep lane, hold speed (the default)
       lateral  KEEP / LEFT / RIGHT moves the target lane (reference.LaneTarget: one lane at a time, saturating at the
                edges; ignored while a lane change is still in progress) -> d* = the target lane's centre
-      speed    v* = method.speeds_km_h[level] (80, 70, ..., 0)
+      speed    HOLD / FASTER / SLOWER moves the target speed v* by 10 km/h (reference.SpeedTarget; sticky, starts at
+               the spawn speed): the speed the PID tracks
       -> reference: quintic lateral profile to d* over 2 s (starting from the previous reference's lateral rate and
          acceleration, for continuity) + speed ramp to v* (+2 / -4 m/s^2)
       -> cascaded PID every control step:
@@ -18,9 +19,8 @@ from __future__ import annotations
 import gymnasium as gym
 import numpy as np
 
-from handoff.config import kmh
 from handoff.env import Method
-from handoff.reference import KEEP, LaneTarget, Reference, eval_quintic, quintic_coefficients
+from handoff.reference import KEEP, LaneTarget, Reference, SpeedTarget, eval_quintic, quintic_coefficients
 from handoff.sim import ActuationMap, EgoState, RoadFrame, wrap_angle
 
 
@@ -110,27 +110,33 @@ class CascadedPID:
 class M2(Method):
     def __init__(self, cfg: dict, env):
         m = cfg["method"]
-        self.speeds = [min(kmh(v), env.v_cap) for v in m["speeds_km_h"]]     # level 0 = the default (v_cap)
-        super().__init__(env, period=m["decision_period"],
-                         action_space=gym.spaces.MultiDiscrete([3, len(self.speeds)]))
+        super().__init__(env, period=m["decision_period"], action_space=self.ACTION_SPACE)
         self.lane = LaneTarget(cfg["lane_action"])
+        self.speed = SpeedTarget(cfg["lane_action"], env.v_cap)
         self.tr_cfg = m["trajectory"]
         self.pid = CascadedPID(m["pid"], ActuationMap(cfg["actuation"]["table"]), env.dt)
         self.t = 0.0    # time since the current reference was built
 
+    ACTION_SPACE = gym.spaces.MultiDiscrete([3, 3])   # [lane command, speed command]
+    COMMAND_FEATURES = ("target_speed",)   # the sticky target speed / v_max ("cmd"; target lane is an ego feature)
+
     def target_lane_offset(self) -> int:
         return self.lane.offset(self.env.ego, self.env.road)
+
+    def command_state(self) -> list[float]:
+        return [self.speed.v / self.env.v_max]
 
     def reset(self):
         super().reset()
         self.pid.reset()
         self.lane.reset(self.env.ego, self.env.road)
+        self.speed.reset(self.env.ego)
         self.t = 0.0
 
     def decide(self, action):
-        cmd, level = (int(x) for x in np.asarray(action).ravel())
+        cmd, speed_cmd = (int(x) for x in np.asarray(action).ravel())
         self.lane.update(cmd, self.env.ego, self.env.road)
-        return self.set_target(self.lane.lane, self.speeds[level], cmd)
+        return {**self.set_target(self.lane.lane, self.speed.update(speed_cmd), cmd), "speed_cmd": speed_cmd}
 
     def set_target(self, lane: int, v_star: float, cmd: int = KEEP) -> dict:
         """Reference to (target lane centre, v*) from here (also scripts/validate.py check m2: scripted targets)."""

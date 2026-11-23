@@ -1,18 +1,22 @@
-"""M3 — RL + MPC. Every 10 control steps (1 s) the RL picks a lane command; every control step the pipeline below
-turns it into controls. Speed and collision avoidance are the controller's: it drives toward v_cap (80 km/h) as fast
-as the corridor allows.
+"""M3 — RL + MPC. Every 10 control steps (1 s) the RL picks a lane command and a speed command; every control step
+the pipeline below turns them into controls. The trajectory, the speed under the max and collision avoidance are the
+controller's: it drives toward the max speed as fast as the corridor allows.
 
-    action Discrete(3): KEEP / LEFT / RIGHT (0 = KEEP, the default) moves the target lane (reference.LaneTarget: one
-               lane at a time, saturating at the edges; ignored while a lane change is still in progress)
+    action MultiDiscrete [3, 3] = [lane command, speed command]; [0, 0] = keep lane, hold speed (the default; the
+               same action as M2)
+      lateral  KEEP / LEFT / RIGHT moves the target lane (reference.LaneTarget: one lane at a time, saturating at the
+               edges; ignored while a lane change is still in progress)
+      speed    HOLD / FASTER / SLOWER moves the max speed v* by 10 km/h (reference.SpeedTarget; sticky, starts at the
+               spawn speed): the MPC's speed ceiling
       plan     a new reference.LanePlan only when the target lane changes: quintic d(s) from the ego to the target
                lane centre over lane_plan.duration (2.5 s) of travel, lengthened to stay within max_lat_accel;
                flat after                                                                         (per decision)
       gate     (ebrake.gate, OFF by default) a car in the planned path (the line ego -> next plan point crosses its
                keep-out zone) closed on faster than gate_decel allows -> emergency brake, no MPC solve
-      corridor one road-aligned box per MPC stage around the trajectory (the plan at a ramp to v_cap):
+      corridor one road-aligned box per MPC stage around the trajectory (the plan at a ramp to v*):
                lateral faces at the exterior lane centres (+- inset), cut by the cars' keep-out zones
       MPC      mpc.py: tracks the trajectory inside the corridor (soft constraints: exact penalty, so the corridor
-               holds whenever it can), speed ceiling v_cap. Braking for cars is the MPC's job.
+               holds whenever it can), speed ceiling v*. Braking for cars is the MPC's job.
 
 Validation (scripts/validate.py) flies hand-placed waypoints instead: ``plan_waypoints`` (spline through them at a
 given speed, the same corridor + MPC). ``plan_lat_accel`` flags waypoints over the MPC's lateral-accel limit there.
@@ -31,7 +35,7 @@ import numpy as np
 
 from handoff.env import Method
 from handoff.mpc import MPC
-from handoff.reference import KEEP, LanePlan, LaneTarget, Reference, eval_quintic, quintic_coefficients
+from handoff.reference import KEEP, LanePlan, LaneTarget, Reference, SpeedTarget, eval_quintic, quintic_coefficients
 from handoff.sim import ActuationMap, EgoState, ObjectList, RoadFrame, frenet_velocity, wrap_angle
 
 
@@ -251,8 +255,9 @@ def plan_lat_accel(ego: EgoState, waypoints: np.ndarray, v_star: float, brake: f
 class M3(Method):
     def __init__(self, cfg: dict, env):
         m = cfg["method"]
-        super().__init__(env, period=m["decision_period"], action_space=gym.spaces.Discrete(3))
+        super().__init__(env, period=m["decision_period"], action_space=self.ACTION_SPACE)
         self.lane = LaneTarget(cfg["lane_action"])
+        self.speed = SpeedTarget(cfg["lane_action"], env.v_cap)
         self.plan_cfg = m["lane_plan"]
         self.plan: LanePlan | None = None
         self.spline_cfg = m["spline"]
@@ -268,25 +273,32 @@ class M3(Method):
         self.lat_accel = 0.0                # peak lateral acceleration the current plan asks for
         self.tube: Tube | None = None       # this step's corridor (None while the gate brakes)
 
+    ACTION_SPACE = gym.spaces.MultiDiscrete([3, 3])   # [lane command, speed command]
+    COMMAND_FEATURES = ("target_speed",)   # the sticky target speed / v_max ("cmd"; target lane is an ego feature)
+
     def target_lane_offset(self) -> int:
         return self.lane.offset(self.env.ego, self.env.road)
+
+    def command_state(self) -> list[float]:
+        return [self.speed.v / self.env.v_max]
 
     def reset(self):
         super().reset()
         self.mpc.reset(self.env.road)
         self.lane.reset(self.env.ego, self.env.road)
+        self.speed.reset(self.env.ego)
         self.plan = None
         self.waypoints = np.zeros((0, 2))
         self.lat_accel = 0.0
         self.tube = None
 
     def decide(self, action):
-        cmd = int(np.asarray(action).ravel()[0])
+        cmd, speed_cmd = (int(x) for x in np.asarray(action).ravel())
         env = self.env
         ego, road = env.ego, env.road
         if self.lane.update(cmd, ego, road) or self.plan is None:
             self.plan = LanePlan.build(ego, road.lane_centers[self.lane.lane], self.plan_cfg)
-        v_star = env.v_cap
+        v_star = self.speed.update(speed_cmd)
         self.mpc.set_speed_limit(v_star)
         p = self.plan
         self.reference = p.reference(ego, road, v_star, float(self.spline_cfg["ds"]), float(self.plan_cfg["ahead"]))
@@ -296,7 +308,7 @@ class M3(Method):
         self.lat_accel = p.peak_lat_accel(ego.v)
         return {"vector": np.array([cmd, self.lane.lane, p.d1, v_star]), "k": 0, "lane": self.lane.lane,
                 "d_target": p.d1, "v_target": v_star, "waypoints": self.waypoints, "lat_accel": self.lat_accel,
-                "feasible": True}
+                "feasible": True, "speed_cmd": speed_cmd}
 
     def plan_waypoints(self, waypoints: np.ndarray, v_star: float) -> dict:
         """Validation only (scripts/validate.py): fly a spline through hand-placed (s, d) waypoints at v*, through

@@ -1,23 +1,29 @@
-"""Reward (configs/r*.yaml): a weighted sum of raw terms, computed every control step and summed over a
-decision by the env. Terminal terms are added on the step the episode ends.
+"""Reward: a weighted sum of raw terms, computed every control step and summed over a decision by the env. Terminal
+terms are added on the step the episode ends.
+
+r5 (configs/r5.yaml): progress and speed EARN every step of normal driving (so quitting never pays), a quadratic
+speed shortfall makes crawling cost (so crawling never pays), a crash costs a lot. Raw terms, per control step:
 
     progress      Δs since the previous step (m)
-    time          -1 per step
+    speed         +(v / v_max)^2: quadratic in speed (1 at 80 km/h, 0.32 at 45, 0 stopped)
+    speed_gap     -((v - v_max) / v_max)^2: quadratic shortfall from the 80 km/h cap (-1 stopped, -0.25 at 40 km/h,
+                  0 at 80); steepest where the car is slowest, so crawling is the most expensive way to drive
     success       1 on route completion (MetaDrive arrive_dest)
-    collision     1 on a crash, or an M3 failed run (emergency brake / infeasible waypoints ended the episode)
+    collision     1 on a crash, or an M3 emergency brake (gate) ending the episode
     off_road      1 when out of road (incl. crossing the centre line / road edge)
+    lane_keep     -(offset / half a lane width)^2, offset = the ego centre's distance from its nearest lane centre:
+                  0 centred, -0.11 at 0.57 m, -1 on a lane line. Smooth, so every correction toward the centre pays.
+                  A lane change averages about -1/3 over the ~2 s it takes; riding a line costs the full -1
+    heading       -(|heading error| - 0.5 deg), when positive (rad): straight driving costs nothing, slow weaving does
+    steer_rate    -|change of the lateral acceleration the steering asks for| (m/s^2) since the previous step, with
+                  a_lat = v^2 tan(steering angle) / wheelbase: rapid oscillation / jitter. Speed-aware, so the same
+                  wheel twitch costs more at 80 km/h than in a car park. A smooth lane change ~ -12 m/s^2 in total
+    headway       -(1 - headway / HEADWAY_S) when positive, for the nearest car overlapping the ego sideways ahead
+                  (headway = bumper gap / ego speed) or behind (gap / its speed: cutting in front of it): 0 at 0.5 s
+                  or more, -1 at contact. Tailgating closer than 0.5 s is charged; closer than that is a near miss
+    time          -1                                           (logged only in r5)
     lane_change   lanes changed this step: counts once the ego centre settles within 0.3 lane widths of a new
-                  lane's centre (two lanes at once = 2)
-    heading       -(|heading error| - 0.5 deg), when positive (rad): straight driving costs nothing, oscillation
-                  does. Summed over a lane change it is about lateral distance / speed whatever the manoeuvre's
-                  length (3.5 m at 20 m/s: ~1.5 rad-steps after the deadband), so a pass stays cheap.
-    speed_gap     -((v - v_max) / v_max)^2: quadratic shortfall from the 80 km/h cap (0 at 80, -0.25 at 40 km/h)
-    lane_keep     -1 while the ego centre is more than 0.57 m from its nearest lane centre, else 0 (on 3.5 m lanes
-                  the body then stays ~25 cm inside the lane lines, so riding a line is charged). A lane change
-                  crosses it in ~1-1.5 s.
-    proximity     -(G - gap) / G for the closest car whose body overlaps the ego's sideways (same lane, or mid lane
-                  change), when the bumper-to-bumper gap is under G: G = 5 m for a car ahead (following), 2 m for a
-                  car behind (e.g. cutting in after a pass). 0 at G, -1 at contact. Cars beside the ego never count.
+                  lane's centre (two lanes at once = 2)       (logged only: the lane_changes metric)
 """
 
 from __future__ import annotations
@@ -26,14 +32,13 @@ import numpy as np
 
 from handoff.sim import EgoState, ObjectList, RoadFrame
 
-TERMS = ("progress", "time", "success", "collision", "off_road", "lane_change", "heading", "speed_gap",
-         "lane_keep", "proximity")
+TERMS = ("progress", "speed", "speed_gap", "time", "success", "collision", "off_road", "lane_keep", "heading",
+         "steer_rate", "headway", "lane_change")
 TERMINAL = ("success", "collision", "off_road")   # charged once, on the step the episode ends
 LANE_SETTLE = 0.3   # fraction of a lane width
 HEADING_DEADBAND = float(np.deg2rad(0.5))   # rad; heading error below this is free
-LANE_ZONE = 0.57        # m, in-lane zone half-width around each lane centre (ego centre)
-PROXIMITY_GAP_AHEAD = 5.0    # m, bumper-to-bumper gap to a car ahead below which proximity is charged
-PROXIMITY_GAP_BEHIND = 2.0   # m, same for a car behind
+HEADWAY_S = 0.5     # s; time headway below which following (or being followed after a cut-in) is charged
+V_HEADWAY_MIN = 1.0  # m/s; speed floor in the headway (a car stopped behind a stopped car is not tailgating)
 
 
 def crashed(info: dict) -> bool:
@@ -43,8 +48,9 @@ def crashed(info: dict) -> bool:
 
 
 class Reward:
-    def __init__(self, reward_cfg: dict, v_max: float):
+    def __init__(self, reward_cfg: dict, v_max: float, wheelbase: float, max_steering_rad: float):
         self.v_max = float(v_max)     # m/s, the ego's speed cap (sim.ego.max_speed_km_h)
+        self.wheelbase, self.max_steering_rad = float(wheelbase), float(max_steering_rad)
         weights = reward_cfg["weights"]
         unknown = [n for n, w in weights.items() if n not in TERMS and float(w) != 0.0]
         if unknown:   # weight-0 entries for removed terms (old run configs) are ignored
@@ -61,32 +67,40 @@ class Reward:
         """(total, raw terms, weighted terms) for one control step."""
         raw = {
             "progress": ego.s - prev.s,
+            "speed": (ego.v / self.v_max) ** 2,
             "time": -1.0,
+            "speed_gap": -((ego.v - self.v_max) / self.v_max) ** 2,
             "success": float(bool(info.get("arrive_dest"))),
             "collision": float(crashed(info) or bool(info.get("emergency_brake"))),
             "off_road": float(bool(info.get("out_of_road"))),
-            "lane_change": self._lane_change(prev, ego),
+            "lane_keep": -self._lane_offset(ego) ** 2,
             "heading": -max(abs(ego.psi_err) - HEADING_DEADBAND, 0.0),
-            "speed_gap": -((ego.v - self.v_max) / self.v_max) ** 2,
-            "lane_keep": -float(self._off_lane(ego)),
-            "proximity": -self._proximity(ego, objects),
+            "steer_rate": -abs(self._lat_accel(ego) - self._lat_accel(prev)),
+            "headway": -self._headway(ego, objects),
+            "lane_change": self._lane_change(prev, ego),
         }
         weighted = {n: self.weights[n] * raw[n] for n in TERMS}
         return float(sum(weighted.values())), raw, weighted
 
-    def _off_lane(self, ego: EgoState) -> bool:
+    def _lane_offset(self, ego: EgoState) -> float:
+        """Distance from the nearest lane centre / half a lane width (0 centred, 1 on a lane line)."""
         road = self.road
-        return abs(ego.d - road.lane_centers[road.nearest_lane(ego.d)]) > LANE_ZONE
+        return abs(ego.d - road.lane_centers[road.nearest_lane(ego.d)]) / (0.5 * road.lane_width)
+
+    def _lat_accel(self, e: EgoState) -> float:
+        """Lateral acceleration (m/s^2) the applied steering asks for at the current speed (kinematic bicycle)."""
+        return e.v**2 * float(np.tan(e.steering * self.max_steering_rad)) / self.wheelbase
 
     @staticmethod
-    def _proximity(ego: EgoState, objects: ObjectList) -> float:
+    def _headway(ego: EgoState, objects: ObjectList) -> float:
+        """Worst (1 - headway / HEADWAY_S) over cars overlapping the ego sideways, ahead or behind; 0 = none."""
         worst = 0.0
         for o in objects:
-            if abs(o.d - ego.d) >= 0.5 * (o.width + ego.width):    # beside the ego: fine
+            if abs(o.d - ego.d) >= 0.5 * (o.width + ego.width):    # beside the ego: not in its path
                 continue
-            gap = abs(o.s - ego.s) - 0.5 * (o.length + ego.length)
-            g = PROXIMITY_GAP_AHEAD if o.s >= ego.s else PROXIMITY_GAP_BEHIND
-            worst = max(worst, min(max((g - gap) / g, 0.0), 1.0))
+            gap = max(abs(o.s - ego.s) - 0.5 * (o.length + ego.length), 0.0)
+            v = ego.v if o.s >= ego.s else o.v                       # the follower's speed
+            worst = max(worst, 1.0 - min(gap / max(v, V_HEADWAY_MIN) / HEADWAY_S, 1.0))
         return worst
 
     def _lane_change(self, prev: EgoState, ego: EgoState) -> float:

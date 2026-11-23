@@ -12,7 +12,7 @@ Each PATH is either
 
 Each folder is scored on its own first (per-episode means), then folders of the same method are averaged; ± is the
 std across folders (seeds) and is left out when a method has a single folder. Crash = collision + emergency_brake +
-off_road (the M3 e-brake ends the episode as a predicted crash, see docs/TRAINING.md §6). time_to_complete is over
+off_road (the M3 e-brake ends the episode as a predicted crash, see docs/DESIGN.md §4). time_to_complete is over
 successful episodes only; min gap / min TTC are per-episode minima averaged over episodes (inf = no car ahead, ignored).
 """
 

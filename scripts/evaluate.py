@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """Final evaluation of a trained checkpoint, or of B0, on the fixed evaluation seeds.
 
-    python scripts/evaluate.py --checkpoint runs/m3/r4_straight/seed_0/<ts>/checkpoints/best.zip --n-workers 4
-    python scripts/evaluate.py --checkpoint runs/m3/r4_straight/seed_0/<ts>  # run folder: final.zip, else best.zip
+    python scripts/evaluate.py --checkpoint runs/m3/r5/seed_0/<ts>/checkpoints/best.zip --n-workers 4
+    python scripts/evaluate.py --checkpoint runs/m3/r5/seed_0/<ts>  # run folder: final.zip, else best.zip
     python scripts/evaluate.py --method b0 --out runs/eval/b0
 
 With a checkpoint, the config is the run's own config.yaml (--set overrides still apply), so the evaluated env

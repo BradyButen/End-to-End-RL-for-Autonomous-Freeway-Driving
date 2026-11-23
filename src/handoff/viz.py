@@ -2,11 +2,11 @@
 
 Viewer overlays (keys: M = overlays on / off, X = end the episode, K = M3 corridor constraints on / off):
   all  white line     ego trail (last 20 s)
-  M2   yellow line    quintic reference          white ball  d* at its end    magenta ball  PID tracking point
-  M3   yellow line    spline reference           cyan line   MPC predicted path
+  M2   yellow line    quintic reference          white ball  its end          magenta ball  PID tracking point
+  M3   yellow line    lane plan (validation: waypoint spline)   cyan line   MPC predicted path
        blue lines     corridor over the MPC horizon (left / right bound per stage; cross lines = car faces)
-       magenta boxes  car keep-out zones         orange line gate check (ego -> next waypoint; red while it fires)
-       white balls    waypoints in use (k)       grey balls  slots switched off by the count channel
+       magenta boxes  car keep-out zones         orange line gate check (ego -> next plan point; red while it fires)
+       white balls    plan points (validation: the placed waypoints)
 Every viewed / validated episode writes episodes/<id>.npz, <id>_overview.png and <id>_steps.csv.
 """
 
@@ -19,7 +19,7 @@ from pathlib import Path
 
 import numpy as np
 
-WHITE, GREY = (1.0, 1.0, 1.0, 1.0), (0.5, 0.5, 0.5, 1.0)
+WHITE = (1.0, 1.0, 1.0, 1.0)
 YELLOW, CYAN = (1.0, 0.85, 0.1, 1.0), (0.1, 0.9, 1.0, 1.0)
 BLUE, MAGENTA = (0.3, 0.5, 1.0, 1.0), (1.0, 0.3, 1.0, 1.0)
 ORANGE, RED, TRAIL = (1.0, 0.6, 0.2, 1.0), (1.0, 0.15, 0.15, 1.0), (0.85, 0.85, 0.85, 1.0)
@@ -70,14 +70,16 @@ def overlay(env, diag: dict) -> tuple[list, list, dict]:
     text = {"method": f"{name}  seed {env.episode_seed}", "t": f"{ego.t:5.1f} s", "speed": f"{ego.v * 3.6:5.1f} km/h",
             "s / d": f"{ego.s:6.1f} / {ego.d:5.2f} m"}
     lines, points = [], []
+    if name in ("m2", "m3") and dec:
+        cmd = int(dec["vector"][0])
+        text["RL lane command"] = (("keep", "LEFT", "RIGHT")[cmd]
+                                   + ("  (ignored: changing lanes)" if cmd and method.lane.changing(ego, road) else ""))
+        text["target lane / v*"] = (f"{dec.get('lane', '-')} (d {dec['d_target']:+.1f} m) / "
+                                    f"{dec['v_target'] * 3.6:4.0f} km/h")
     if name == "m3" and dec:
         gated = bool(diag.get("gated_brake"))
-        text["RL v* (max speed)"] = f"{dec['v_target'] * 3.6:5.1f} km/h"
-        text["RL waypoints k"] = f"{dec['k']} of {method.n_slots}"
         text["plan lateral accel"] = (f"{dec['lat_accel']:4.1f} m/s2" + ("" if dec["feasible"] else
                                       f"  INFEASIBLE (> {method.lat_accel_limit:g})"))
-        for j, (s, d) in enumerate(dec["waypoints"]):
-            text[f"  wp{j + 1} ahead / d"] = f"{s - ego.s:5.1f} / {d:5.2f} m"
         text["MPC"] = f"{str(diag.get('status', ''))[:22]}  {1000 * float(diag.get('solve_time', 0) or 0):4.0f} ms"
         if diag.get("fallback"):
             text["FALLBACK"] = f"{diag.get('fallback_reason', '')} / {diag.get('fallback_mode', '')}"
@@ -97,9 +99,7 @@ def overlay(env, diag: dict) -> tuple[list, list, dict]:
         if len(ahead):
             lines.append((np.array([[ego.x, ego.y], road.to_world(*map(float, ahead[0]))]), RED if gated else ORANGE))
         points += [(road.to_world(float(s), float(d)), WHITE) for s, d in dec["waypoints"]]
-        points += [(road.to_world(float(s), float(d)), GREY) for s, d in dec["slots"][dec["k"]:]]
     elif name == "m2" and dec:
-        text["RL d* / v*"] = f"{dec['d_target']:5.2f} m / {dec['v_target'] * 3.6:5.1f} km/h"
         text["ref d / v"] = f"{diag.get('ref_d', 0):5.2f} m / {diag.get('ref_v', 0) * 3.6:5.1f} km/h"
         text["cross-track / heading err"] = (f"{diag.get('cross_track', 0):+5.2f} m / "
                                              f"{np.rad2deg(diag.get('heading_error', 0)):+5.1f} deg")
@@ -326,11 +326,9 @@ def episode_report(summary_or_npz, out_dir: str | Path, road=None, placed=None, 
     t, s, d, v = data["step_t"], data["step_s"], data["step_d"], data["step_v"]
     dec_idx = np.clip(data["step_decision_index"].astype(int), 0, max(len(data["dec_k"]) - 1, 0))
     decoded = data["dec_decoded"] if data["dec_decoded"].ndim == 2 else np.zeros((len(data["dec_k"]), 2))
-    v_star = d_star = k_step = np.full_like(t, np.nan)
-    if method == "m2" and len(decoded):
-        d_star, v_star = decoded[dec_idx, 0], decoded[dec_idx, 1]
-    elif method == "m3" and len(decoded):
-        v_star, k_step = decoded[dec_idx, -2], decoded[dec_idx, -1]
+    v_star = d_star = cmd = np.full_like(t, np.nan)
+    if method in ("m2", "m3") and len(decoded) and decoded.shape[1] == 4:   # [command, target lane, d*, v*]
+        cmd, d_star, v_star = decoded[dec_idx, 0], decoded[dec_idx, 2], decoded[dec_idx, 3]
     bad = (data["step_gated_brake"] > 0) | (data["step_fallback"] > 0)
 
     plt = _plt()
@@ -346,15 +344,12 @@ def episode_report(summary_or_npz, out_dir: str | Path, road=None, placed=None, 
     a.plot([], [], ".", color="tab:blue", label="cars (while within 50 m)")
     for cs, cd in cars or []:
         a.add_patch(plt.Rectangle((cs - 2.26, cd - 0.93), 4.515, 1.852, color="tab:blue", zorder=3))
-    if method == "m3":
-        wps = data["dec_waypoints"].reshape(-1, 2)
-        a.plot(wps[:, 0], wps[:, 1], ".", color="crimson", ms=3, alpha=0.5, label="RL waypoints (every decision)")
     if placed is not None and len(placed):
         a.plot(np.asarray(placed)[:, 0], np.asarray(placed)[:, 1], "o", color="crimson", label="placed waypoints")
     if method in ("m2", "m3"):
         a.plot(s, data["step_ref_d"], "--", color="goldenrod", lw=1.2, label="reference d at ego s")
-    if method == "m2":
-        a.step(s, d_star, where="post", color="crimson", lw=1, label="RL d*")
+    if method in ("m2", "m3"):
+        a.step(s, d_star, where="post", color="crimson", lw=1, label="RL target lane")
     a.plot(s, d, color="k", lw=1.6, label="ego")
     if bad.any():
         a.plot(s[bad], d[bad], "x", color="red", label="gate / fallback")
@@ -374,8 +369,8 @@ def episode_report(summary_or_npz, out_dir: str | Path, road=None, placed=None, 
     a.plot(t, d, "k", label="ego d")
     if method in ("m2", "m3"):
         a.plot(t, data["step_ref_d"], "--", color="goldenrod", label="ref d")
-    if method == "m2":
-        a.step(t, d_star, where="post", color="crimson", lw=1, label="RL d*")
+    if method in ("m2", "m3"):
+        a.step(t, d_star, where="post", color="crimson", lw=1, label="RL target lane")
     a.set_ylabel("d (m)")
     a.legend(fontsize=8, ncol=3)
     a = ax[3]
@@ -396,8 +391,8 @@ def episode_report(summary_or_npz, out_dir: str | Path, road=None, placed=None, 
                 a.axhline(1000 * solver_limit_s, color="tab:red", ls=":", label="max_cpu_time")
             a.set_ylabel("ms")
             a2 = a.twinx()
-            a2.step(t, k_step, where="post", color="tab:green", lw=1, label="RL k")
-            a2.set_ylabel("k")
+            a2.step(t, cmd, where="post", color="tab:green", lw=1, label="RL command (0 keep, 1 left, 2 right)")
+            a2.set_ylabel("command")
             a2.legend(fontsize=8, loc="upper right")
         else:
             a.plot(t, data["step_tracking_error"], label="|cross-track| (m)")
@@ -429,7 +424,7 @@ def reward_report(npz, out_dir: str | Path | None = None, weights: dict | None =
     """How the return built up over an episode: <id>_reward.png (cumulative return and each term's share, the
     reward rate, speed and lane) -> (path, {term: total}).
 
-    ``weights`` re-scores the episode with another reward (e.g. ``reward_weights("r4")``): the reward is linear in
+    ``weights`` re-scores the episode with another reward (e.g. ``reward_weights("r5")``): the reward is linear in
     the logged raw terms, so this is exact for any weights over the same terms. Default: the weights it ran with."""
     from handoff.logs import load_episode
     from handoff.reward import TERMINAL

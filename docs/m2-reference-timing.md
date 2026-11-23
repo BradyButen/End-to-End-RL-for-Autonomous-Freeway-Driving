@@ -1,5 +1,9 @@
 # M2's reference: why the label lookahead has to match the quintic horizon
 
+> **Historical (since 2026-11-23).** M2's action is now a lane command + speed level (DESIGN §4) and M2 is no longer
+> warm-started, so no d\* labels are built. The timing lesson (a receding-horizon reference lags its target by
+> ~0.3 T) still describes how M2's quintic flies a lane change.
+
 Notes from 2026-11-21. Change: human-demo labels for M2 read the human **1.3 s** ahead instead of 2 s
 (`scripts/build_demos.py --m2-ahead-s`, default 1.3), matched to M2's unchanged quintic horizon `trajectory.horizon`
 = 2 s. Result: M2 flying the human's own labels goes from 0.60 m rms / 0.7 s early (sideswiping traffic on almost
@@ -112,7 +116,7 @@ Any receding-horizon pipeline where the policy outputs an *end point* and only t
 this property: the executed motion leads or lags the target depending on the horizon and the replan period. M3 has
 an analogous choice in how its speed target v\* is labelled (it is both target and hard ceiling there):
 averaging the human's speed over the ~8 s waypoint stretch made M3 slow ~175 m early; the next-second speed made it
-unable to catch up; the human's highest speed over the next 3 s matched (`docs/human-data-pipeline.md`, step 5).
+unable to catch up; the human's highest speed over the next 3 s matched (`docs/warm-start.md`, step 5).
 
 ## Files
 

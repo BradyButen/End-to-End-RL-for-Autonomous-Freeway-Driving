@@ -1,20 +1,26 @@
-"""M2 — RL + PID. Every 5 control steps (0.5 s) the RL picks a target lateral offset d* and speed v*:
+"""M2 — RL + PID. Every 5 control steps (0.5 s) the RL picks a lane command and a speed:
 
-    action [-1, 1]^2 --decode--> d* in [right edge - 1 m, left edge + 1 m] (not clipped to the road), v* in [0, 80] km/h
+    action MultiDiscrete [3, n_speeds] = [lateral command, speed level]; [0, 0] = keep lane, 80 km/h (the default)
+      lateral  KEEP / LEFT / RIGHT moves the target lane (reference.LaneTarget: one lane at a time, saturating at the
+               edges; ignored while a lane change is still in progress) -> d* = the target lane's centre
+      speed    v* = method.speeds_km_h[level] (80, 70, ..., 0)
       -> reference: quintic lateral profile to d* over 2 s (starting from the previous reference's lateral rate and
          acceleration, for continuity) + speed ramp to v* (+2 / -4 m/s^2)
       -> cascaded PID every control step:
              steering       = PID_heading(psi_ref - psi) + PID_lateral(d_ref - d)    reference at the ego's s
              throttle_brake = PID_speed(v_ref - v) + table^-1(a_ref)                  reference at the next instant
-No safety layer: the RL must learn to avoid cars. Gains: configs/m2.yaml (tuned with scripts/matlab/m2_pid_tuning.m).
+No safety layer: the RL owns the speed and must learn to brake for cars (M3's MPC does that for it).
+Gains: configs/m2.yaml (tuned with scripts/matlab/m2_pid_tuning.m).
 """
 
 from __future__ import annotations
 
+import gymnasium as gym
 import numpy as np
 
-from handoff.env import Method, affine, unaffine
-from handoff.reference import Reference, eval_quintic, quintic_coefficients
+from handoff.config import kmh
+from handoff.env import Method
+from handoff.reference import KEEP, LaneTarget, Reference, eval_quintic, quintic_coefficients
 from handoff.sim import ActuationMap, EgoState, RoadFrame, wrap_angle
 
 
@@ -104,39 +110,42 @@ class CascadedPID:
 class M2(Method):
     def __init__(self, cfg: dict, env):
         m = cfg["method"]
-        super().__init__(env, period=m["decision_period"], action_dim=2)
-        self.lateral_margin = float(m["lateral_margin"])
+        self.speeds = [min(kmh(v), env.v_cap) for v in m["speeds_km_h"]]     # level 0 = the default (v_cap)
+        super().__init__(env, period=m["decision_period"],
+                         action_space=gym.spaces.MultiDiscrete([3, len(self.speeds)]))
+        self.lane = LaneTarget(cfg["lane_action"])
         self.tr_cfg = m["trajectory"]
         self.pid = CascadedPID(m["pid"], ActuationMap(cfg["actuation"]["table"]), env.dt)
         self.t = 0.0    # time since the current reference was built
 
-    def _d_range(self) -> tuple[float, float]:
-        road = self.env.road
-        return road.d_min - self.lateral_margin, road.d_max + self.lateral_margin
-
-    def decode(self, action) -> tuple[float, float]:
-        return affine(action[0], *self._d_range()), affine(action[1], 0.0, self.env.v_cap)
-
-    def encode(self, d_star: float, v_star: float) -> np.ndarray:
-        """Inverse of ``decode`` (scripted actions)."""
-        return np.array([unaffine(d_star, *self._d_range()), unaffine(v_star, 0.0, self.env.v_cap)])
+    def target_lane_offset(self) -> int:
+        return self.lane.offset(self.env.ego, self.env.road)
 
     def reset(self):
         super().reset()
         self.pid.reset()
+        self.lane.reset(self.env.ego, self.env.road)
         self.t = 0.0
 
     def decide(self, action):
-        d_star, v_star = self.decode(action)
+        cmd, level = (int(x) for x in np.asarray(action).ravel())
+        self.lane.update(cmd, self.env.ego, self.env.road)
+        return self.set_target(self.lane.lane, self.speeds[level], cmd)
+
+    def set_target(self, lane: int, v_star: float, cmd: int = KEEP) -> dict:
+        """Reference to (target lane centre, v*) from here (also scripts/validate.py check m2: scripted targets)."""
+        env = self.env
+        self.lane.lane = int(lane)
+        d_star = float(env.road.lane_centers[self.lane.lane])
         lat_init = None
         if self.reference is not None:
             r = self.reference.at_time(self.t)
             lat_init = (r["d_dot"], r["d_ddot"])
-        env = self.env
         self.reference = build_m2_reference(env.ego, env.road, d_star, v_star, self.tr_cfg, lat_init,
                                             min_duration=(self.period + 1) * env.dt)
         self.t = 0.0
-        return {"vector": np.array([d_star, v_star]), "k": 0, "d_target": d_star, "v_target": v_star}
+        return {"vector": np.array([cmd, self.lane.lane, d_star, v_star]), "k": 0, "lane": self.lane.lane,
+                "d_target": d_star, "v_target": v_star}
 
     def control(self):
         u, diag = self.pid.step(self.env.ego, self.reference, self.t)

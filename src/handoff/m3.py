@@ -1,35 +1,37 @@
-"""M3 — RL + MPC. Every 10 control steps (1 s) the RL picks up to 5 waypoints and a speed; every control step the
-pipeline below turns them into controls.
+"""M3 — RL + MPC. Every 10 control steps (1 s) the RL picks a lane command; every control step the pipeline below
+turns it into controls. Speed and collision avoidance are the controller's: it drives toward v_cap (80 km/h) as fast
+as the corridor allows.
 
-    action [-1, 1]^12 = [ds_1, d_1, ..., ds_5, d_5, v*, count]
-      decode   k = 1..5 waypoints (s, d): ds in [5, 40] m per slot (cumulative from the ego), d in
-               [right edge - 1 m, left edge + 1 m]; v* in [20, 80] km/h                          (per decision)
-      check    each spline segment's peak lateral acceleration (5.77 |dd| v^2 / ds^2) vs. the MPC's max_lat_accel;
-               over it = "infeasible": logged only (decision["feasible"], episode infeasible_count), the plan is
-               flown as asked and the MPC (which enforces the limit itself) rounds the corner  (per decision)
-      spline   piecewise quintic in s through the waypoints, flat 80 m beyond the last, speed v* (per decision)
-      gate     (ebrake.gate, OFF by default) a car in the planned path (the line ego -> next waypoint crosses its
+    action Discrete(3): KEEP / LEFT / RIGHT (0 = KEEP, the default) moves the target lane (reference.LaneTarget: one
+               lane at a time, saturating at the edges; ignored while a lane change is still in progress)
+      plan     a new reference.LanePlan only when the target lane changes: quintic d(s) from the ego to the target
+               lane centre over lane_plan.duration (2.5 s) of travel, lengthened to stay within max_lat_accel;
+               flat after                                                                         (per decision)
+      gate     (ebrake.gate, OFF by default) a car in the planned path (the line ego -> next plan point crosses its
                keep-out zone) closed on faster than gate_decel allows -> emergency brake, no MPC solve
-      corridor one road-aligned box per MPC stage around the trajectory (spline at a ramp to v*):
+      corridor one road-aligned box per MPC stage around the trajectory (the plan at a ramp to v_cap):
                lateral faces at the exterior lane centres (+- inset), cut by the cars' keep-out zones
       MPC      mpc.py: tracks the trajectory inside the corridor (soft constraints: exact penalty, so the corridor
-               holds whenever it can); v* is also its speed ceiling. Braking for cars is the MPC's job.
+               holds whenever it can), speed ceiling v_cap. Braking for cars is the MPC's job.
+
+Validation (scripts/validate.py) flies hand-placed waypoints instead: ``plan_waypoints`` (spline through them at a
+given speed, the same corridor + MPC). ``plan_lat_accel`` flags waypoints over the MPC's lateral-accel limit there.
 
 Failed runs (ebrake.ends_episode): only the gate (ebrake.gate, off) ends the episode, as "emergency_brake" with the
-collision penalty. Infeasible waypoints no longer end it (2026-11-22: ending them charged -2000 for noise-perturbed
-lane changes ~10 % over the limit, and taught M3 not to move sideways). MPC solve failures never end the episode:
-the previous plan is replayed, then the car holds speed and lane until a solve succeeds (mpc.py).
+collision penalty. MPC solve failures never end the episode: the previous plan is replayed, then the car holds
+speed and lane until a solve succeeds (mpc.py).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
+import gymnasium as gym
 import numpy as np
 
-from handoff.env import Method, affine, unaffine
+from handoff.env import Method
 from handoff.mpc import MPC
-from handoff.reference import Reference, eval_quintic, quintic_coefficients
+from handoff.reference import KEEP, LanePlan, LaneTarget, Reference, eval_quintic, quintic_coefficients
 from handoff.sim import ActuationMap, EgoState, ObjectList, RoadFrame, frenet_velocity, wrap_angle
 
 
@@ -246,21 +248,13 @@ def plan_lat_accel(ego: EgoState, waypoints: np.ndarray, v_star: float, brake: f
 
 
 # ======================================================================================= method
-def waypoint_count(c: float, n_slots: int) -> int:
-    """Count channel c in [-1, 1] -> k = clip(1 + floor((c + 1) / 2 * n), 1, n)."""
-    c = float(np.clip(c, -1.0, 1.0))
-    return int(np.clip(1 + np.floor((c + 1.0) / 2.0 * n_slots), 1, n_slots))
-
-
 class M3(Method):
     def __init__(self, cfg: dict, env):
         m = cfg["method"]
-        self.n_slots = int(m["n_slots"])
-        super().__init__(env, period=m["decision_period"], action_dim=2 * self.n_slots + 2)
-        self.ds_range = tuple(float(x) for x in m["ds_range"])
-        self.lateral_margin = float(m["lateral_margin"])
-        lo, hi = m["speed_range_km_h"]
-        self.v_range = (float(lo) / 3.6, min(float(hi) / 3.6, env.v_cap))
+        super().__init__(env, period=m["decision_period"], action_space=gym.spaces.Discrete(3))
+        self.lane = LaneTarget(cfg["lane_action"])
+        self.plan_cfg = m["lane_plan"]
+        self.plan: LanePlan | None = None
         self.spline_cfg = m["spline"]
         eb = m["ebrake"]
         self.gate, self.gate_decel = bool(eb["gate"]), float(eb["gate_decel"])
@@ -270,50 +264,53 @@ class M3(Method):
                        lr=ego["rear_wheelbase"], max_steering_rad=env.max_steering_rad, v_cap=env.v_cap)
         self.corridor = Corridor(m["corridor"], self.mpc.N, self.mpc.dt, ego["length"], ego["width"], env.v_cap)
         self.lat_accel_limit = float(m["mpc"]["max_lat_accel"])
-        self.waypoints = np.zeros((0, 2))   # the k waypoints in use (s, d)
+        self.waypoints = np.zeros((0, 2))   # points on the current plan (s, d): gate, logs, overlays
         self.lat_accel = 0.0                # peak lateral acceleration the current plan asks for
         self.tube: Tube | None = None       # this step's corridor (None while the gate brakes)
 
-    def _d_range(self) -> tuple[float, float]:
-        road = self.env.road
-        return road.d_min - self.lateral_margin, road.d_max + self.lateral_margin
-
-    def decode(self, action) -> tuple[np.ndarray, int, float]:
-        """-> all 5 slots as (s, d), the count k, v* (m/s)."""
-        ds = np.array([affine(action[2 * i], *self.ds_range) for i in range(self.n_slots)])
-        d = np.array([affine(action[2 * i + 1], *self._d_range()) for i in range(self.n_slots)])
-        s = self.env.ego.s + np.cumsum(ds)
-        return np.stack([s, d], axis=1), waypoint_count(action[-1], self.n_slots), affine(action[-2], *self.v_range)
-
-    def encode(self, ds: list[float], d: list[float], v: float) -> np.ndarray:
-        """Inverse of ``decode`` (scripted waypoints): per-slot spacing ds and offsets d (k = len(ds); unused slots
-        repeat the last), speed v (m/s)."""
-        k = len(ds)
-        a = np.zeros(2 * self.n_slots + 2)
-        for i in range(self.n_slots):
-            a[2 * i] = unaffine(ds[min(i, k - 1)], *self.ds_range)
-            a[2 * i + 1] = unaffine(d[min(i, k - 1)], *self._d_range())
-        a[-2] = unaffine(v, *self.v_range)
-        a[-1] = 2 * (k - 0.5) / self.n_slots - 1
-        return np.clip(a, -1, 1)
+    def target_lane_offset(self) -> int:
+        return self.lane.offset(self.env.ego, self.env.road)
 
     def reset(self):
         super().reset()
         self.mpc.reset(self.env.road)
+        self.lane.reset(self.env.ego, self.env.road)
+        self.plan = None
         self.waypoints = np.zeros((0, 2))
         self.lat_accel = 0.0
         self.tube = None
 
     def decide(self, action):
-        slots, k, v_star = self.decode(action)
-        self.waypoints = slots[:k]
-        self.lat_accel = plan_lat_accel(self.env.ego, self.waypoints, v_star, self.corridor.brake)
+        cmd = int(np.asarray(action).ravel()[0])
+        env = self.env
+        ego, road = env.ego, env.road
+        if self.lane.update(cmd, ego, road) or self.plan is None:
+            self.plan = LanePlan.build(ego, road.lane_centers[self.lane.lane], self.plan_cfg)
+        v_star = env.v_cap
         self.mpc.set_speed_limit(v_star)
-        self.reference = spline_reference(self.env.ego, self.env.road, self.waypoints, v_star,
-                                          ds=self.spline_cfg["ds"], extend=self.spline_cfg["extend"])
-        return {"vector": np.concatenate([slots.ravel(), [v_star, k]]), "k": k, "v_target": v_star,
-                "waypoints": self.waypoints, "slots": slots, "lat_accel": self.lat_accel,
-                "feasible": self.lat_accel <= self.lat_accel_limit}
+        p = self.plan
+        self.reference = p.reference(ego, road, v_star, float(self.spline_cfg["ds"]), float(self.plan_cfg["ahead"]))
+        s = np.array([p.s0 + 0.5 * p.length, p.s0 + p.length, p.s0 + p.length + 40.0])
+        s = s[s > ego.s + 1.0] if np.any(s > ego.s + 1.0) else np.array([ego.s + 40.0])
+        self.waypoints = np.stack([s, p.at(s)[0]], axis=1)
+        self.lat_accel = p.peak_lat_accel(ego.v)
+        return {"vector": np.array([cmd, self.lane.lane, p.d1, v_star]), "k": 0, "lane": self.lane.lane,
+                "d_target": p.d1, "v_target": v_star, "waypoints": self.waypoints, "lat_accel": self.lat_accel,
+                "feasible": True}
+
+    def plan_waypoints(self, waypoints: np.ndarray, v_star: float) -> dict:
+        """Validation only (scripts/validate.py): fly a spline through hand-placed (s, d) waypoints at v*, through
+        the same corridor + MPC. Use it as the decision: ``env.method.decide = lambda _a: m.plan_waypoints(...)``."""
+        env = self.env
+        v_star = min(float(v_star), env.v_cap)
+        self.waypoints = np.asarray(waypoints, float).reshape(-1, 2)
+        self.lat_accel = plan_lat_accel(env.ego, self.waypoints, v_star, self.corridor.brake)
+        self.mpc.set_speed_limit(v_star)
+        self.reference = spline_reference(env.ego, env.road, self.waypoints, v_star, ds=self.spline_cfg["ds"],
+                                          extend=self.spline_cfg["extend"])
+        return {"vector": np.array([KEEP, -1, self.waypoints[-1, 1], v_star]), "k": len(self.waypoints),
+                "d_target": float(self.waypoints[-1, 1]), "v_target": v_star, "waypoints": self.waypoints,
+                "lat_accel": self.lat_accel, "feasible": self.lat_accel <= self.lat_accel_limit}
 
     def control(self):
         env = self.env

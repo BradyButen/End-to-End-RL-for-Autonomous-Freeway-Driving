@@ -2,7 +2,7 @@
 
 One RL step = one decision:
 
-    decision = method.decide(action)              # M1: the controls; M2: a quintic reference; M3: a spline
+    decision = method.decide(action)              # M1: the controls; M2: target lane + speed; M3: target lane
     for j in range(method.period):                # M1 1, M2 5, M3 10 control steps (0.1 s each)
         u, diag = method.control()                # [steering, throttle_brake] (+ controller diagnostics)
         MetaDrive step -> ego / cars -> reward -> log
@@ -10,9 +10,12 @@ One RL step = one decision:
     return obs, reward summed over the decision, ...
 
 Same observation and reward for every method:
-  * obs = {"bev": 5x84x84 top-down (road, past positions, 3 traffic frames; +-50 m),
-           "ego": [v / v_max, d (road-centred, / half width), heading error, steering, throttle_brake]}
-  * reward = reward.py (configs/r4_straight.yaml by default), summed undiscounted over the decision's control steps.
+  * obs (ground truth, like a tracking stack's output; ``observation_space``):
+      "ego":   EGO_FEATURES (speed, position in the road and in the lane, heading error, last commands, the target
+               lane relative to the current one (M2 / M3 lane changes in progress, 0 for M1), time left)
+      "lanes": for the lanes left of / at / right of the ego: exists, then the nearest car ahead and behind in that
+               lane (LANE_SLOT each), out to observation.range (100 m)
+  * reward = reward.py (configs/r5.yaml by default), summed undiscounted over the decision's control steps.
 
 A method is a small class (m1.py, m2.py, m3.py) with ``period``, ``action_space``, ``reset()``, ``decide(action)``
 and ``control()``; it reads the world from the env (``env.ego``, ``env.objects``, ``env.road``).
@@ -37,30 +40,89 @@ from handoff.sim import (
     build_road_frame,
     extract_ego,
     extract_objects,
+    frenet_velocity,
     make_metadrive_env,
     spawn_car,
     time_to_collision,
 )
 
+# ======================================================================================= observation
+EGO_FEATURES = (
+    "v",               # speed / v_max
+    "d",               # lateral position, road-centred / half the road width
+    "lane_offset",     # offset from the nearest lane centre / lane width (+ left)
+    "psi_err",         # heading error to the road (rad)
+    "steering",        # last applied steering command
+    "throttle_brake",  # last applied throttle / brake command
+    "target_lane",     # target lane - current lane, in lanes (+ left); M2 / M3 mid lane change, M1 always 0
+    "t_left",          # time left / episode cap (sim.horizon): with a ~50 s discount the value depends on it
+)
+LANE_SLOT = (          # the nearest car ahead (or behind) in one lane
+    "present",         # 1 = a car, 0 = none within range (then: gap 1, dd the lane's offset, dv 0, inv_ttc 0)
+    "gap",             # bumper-to-bumper distance along the road / observation.range, 0 when overlapping
+    "dd",              # its lateral offset from the ego / lane width (+ left): shows cars mid lane change
+    "dv",              # its speed along the road - the ego's / v_max (+ = faster)
+    "inv_ttc",         # closing speed / gap (1/s, 0 when not closing), clipped to 5
+)
+LANES = (-1, 0, 1)     # lane index offsets from the ego's lane: left, own, right
+LANE_OVERLAP = 0.3     # m: a car occupies a lane when it reaches this far into it (straddling cars occupy both)
 
-def affine(a: float, lo: float, hi: float) -> float:
-    """[-1, 1] -> [lo, hi]."""
-    return lo + (float(a) + 1.0) * 0.5 * (hi - lo)
+
+def observation_space(cfg: dict) -> gym.spaces.Dict:
+    """The policy's observation space (also used by scripts/bc.py to build the same network)."""
+    n_lanes = len(LANES) * (1 + 2 * len(LANE_SLOT))
+    return gym.spaces.Dict({
+        "ego": gym.spaces.Box(-5.0, 5.0, shape=(len(EGO_FEATURES),), dtype=np.float32),
+        "lanes": gym.spaces.Box(-5.0, 5.0, shape=(n_lanes,), dtype=np.float32),
+    })
 
 
-def unaffine(x: float, lo: float, hi: float) -> float:
-    """[lo, hi] -> [-1, 1] (inverse of ``affine``)."""
-    return 2.0 * (float(x) - lo) / (hi - lo) - 1.0
+def lane_features(ego: EgoState, objects: ObjectList, road: RoadFrame, radius: float, v_max: float) -> np.ndarray:
+    """Per lane in LANES: [exists, ahead slot, behind slot] (LANE_SLOT each), relative to the ego's nearest lane."""
+    w = road.lane_width
+    own = road.nearest_lane(ego.d)
+    ego_sdot = frenet_velocity(ego, road)[0]
+    out = []
+    for rel in LANES:
+        i = own + rel
+        empty = [0.0, 1.0, float(-rel), 0.0, 0.0]          # lane index +1 = one lane to the right = d - w
+        if not 0 <= i < len(road.lane_centers):
+            out += [0.0] + empty + empty
+            continue
+        c = road.lane_centers[i]
+        near = {1: None, -1: None}                         # ahead, behind: (gap, car)
+        for o in objects:
+            if abs(o.d - c) >= 0.5 * w + 0.5 * o.width - LANE_OVERLAP:
+                continue
+            side = 1 if o.s > ego.s else -1
+            gap = max(abs(o.s - ego.s) - 0.5 * (o.length + ego.length), 0.0)
+            if near[side] is None or gap < near[side][0]:
+                near[side] = (gap, o)
+        out.append(1.0)
+        for side in (1, -1):
+            if near[side] is None:
+                out += empty
+                continue
+            gap, o = near[side]
+            sdot = frenet_velocity(o, road)[0]
+            closing = (ego_sdot - sdot) if side > 0 else (sdot - ego_sdot)
+            out += [1.0, min(gap / radius, 1.0), (o.d - ego.d) / w, (sdot - ego_sdot) / v_max,
+                    min(max(closing, 0.0) / max(gap, 0.5), 5.0)]
+    return np.asarray(out, np.float32)
 
 
 class Method:
     """Base class of M1 / M2 / M3 / B0: one RL action -> ``decide`` once, then ``control`` every control step."""
 
-    def __init__(self, env: DrivingEnv, period: int, action_dim: int):
+    def __init__(self, env: DrivingEnv, period: int, action_space: gym.Space):
         self.env = env
         self.period = int(period)
-        self.action_space = gym.spaces.Box(-1.0, 1.0, shape=(action_dim,), dtype=np.float32)
+        self.action_space = action_space
         self.reference = None     # what the controller tracks (M2 / M3), drawn by the viewer and logged
+
+    def target_lane_offset(self) -> int:
+        """Target lane - current lane (observation feature ``target_lane``); M2 / M3 override it."""
+        return 0
 
     @staticmethod
     def agent_policy():
@@ -101,13 +163,17 @@ class DrivingEnv(gym.Env):
         self.v_max = kmh(sim["ego"]["max_speed_km_h"])
         self.v_target = kmh(sim["target_speed_km_h"])
         self.v_cap = kmh(sim["v_cap_km_h"])
-        self.radius = float(sim["perception_range"])
+        self.horizon_steps = max(int(sim["horizon"]), 1)
+        self.radius = float(sim["perception_range"])              # controllers, reward, logs: env.objects
+        self.obs_range = float(cfg["observation"]["range"])        # observation: env.seen
         self.max_steering_rad = float(np.deg2rad(sim["ego"]["max_steering_deg"]))
 
         cls = method_class(cfg["method"]["name"])
         self.md = make_metadrive_env(cfg, render=render, agent_policy=cls.agent_policy())
         self.traffic = TrafficSpeeds(cfg["scenario"]["traffic"])
-        self.reward = Reward(cfg["reward"], self.v_max)
+        ego = sim["ego"]
+        self.reward = Reward(cfg["reward"], self.v_max, float(ego["front_wheelbase"]) + float(ego["rear_wheelbase"]),
+                             self.max_steering_rad)
         log = cfg["logging"]
         self.full_log_eval = bool(log["full_log_eval"])
         self.full_every = int(log["train_full_log_every"])
@@ -121,7 +187,8 @@ class DrivingEnv(gym.Env):
 
         self.road: RoadFrame | None = None
         self.ego: EgoState | None = None
-        self.objects: ObjectList = []
+        self.objects: ObjectList = []   # cars within perception_range (controllers, reward, logs), nearest first
+        self.seen: ObjectList = []      # cars within observation.range (the policy's observation)
         self.scripted_cars: list = []   # (MetaDrive vehicle, speed m/s) spawned by validation; perceived like traffic
         self.decision: dict = {}        # the current decision (method.decide output)
         self.on_step = None             # viewer hook: callable(env, diag) after every control step
@@ -131,14 +198,7 @@ class DrivingEnv(gym.Env):
 
         self.method = cls(cfg, self)
         self.action_space = self.method.action_space
-        bev = cfg["observation"]["bev"]
-        self.ego_features = list(cfg["observation"]["ego_features"])
-        self.observation_space = gym.spaces.Dict({
-            # channels-first (C, H, W): SB3's NatureCNN reads channels from shape[0] when normalize_images=False
-            "bev": gym.spaces.Box(0.0, 1.0, shape=(2 + int(bev["frame_stack"]), bev["resolution"], bev["resolution"]),
-                                  dtype=np.float32),
-            "ego": gym.spaces.Box(-5.0, 5.0, shape=(len(self.ego_features),), dtype=np.float32),
-        })
+        self.observation_space = observation_space(cfg)
 
     # ------------------------------------------------------------------ gym API
     def reset(self, *, seed: int | None = None, options: dict | None = None):
@@ -150,13 +210,13 @@ class DrivingEnv(gym.Env):
         ep_seed = options.get("episode_seed")
         self.episode_seed = int(self._seed_rng.integers(*self.train_seeds) if ep_seed is None else ep_seed)
         self.scripted_cars = []
-        raw_obs, _ = self.md.reset(seed=self.episode_seed)
+        self.md.reset(seed=self.episode_seed)
         self.traffic.on_reset(self.md)
         self.road = build_road_frame(self.md)   # each seed has its own map
         self.reward.reset(self.road)
         self.episode_control_steps = self.episode_decisions = 0
         self.ego = extract_ego(self.md, self.road, 0.0)
-        self.objects = self._extract_objects()
+        self._extract_objects()
         kind = "eval" if self.is_eval else "train"
         full = (self.is_eval and self.full_log_eval) or (
             not self.is_eval and self.full_every > 0 and self.total_episodes % self.full_every == 0)
@@ -171,10 +231,10 @@ class DrivingEnv(gym.Env):
         self.episode_open = True
         self.decision = {}
         self.method.reset()
-        return self._obs(raw_obs), {"episode_seed": self.episode_seed, "episode_id": self.episode_id}
+        return self._obs(), {"episode_seed": self.episode_seed, "episode_id": self.episode_id}
 
     def step(self, action):
-        action = np.asarray(action, dtype=np.float64)
+        action = np.asarray(action)
         self.decision = self.method.decide(action)
         start = self.episode_control_steps
         total, n = 0.0, 0
@@ -212,14 +272,14 @@ class DrivingEnv(gym.Env):
         veh = spawn_car(self.md, self.road, s, d, static=speed_kmh <= 0)
         self.scripted_cars.append((veh, kmh(speed_kmh)))
         self._drive_scripted_cars()
-        self.objects = self._extract_objects()
+        self._extract_objects()
         return veh
 
     # ------------------------------------------------------------------ one control step
     def _control_step(self, u: np.ndarray, diag: dict):
         prev = self.ego
         u = np.clip(np.asarray(u, dtype=float), -1.0, 1.0)
-        raw_obs, _, terminated, truncated, info = self.md.step(u)
+        _, _, terminated, truncated, info = self.md.step(u)
         info = dict(info)
         self.traffic.apply(self.md)
         self._drive_scripted_cars()
@@ -229,13 +289,13 @@ class DrivingEnv(gym.Env):
         self.episode_control_steps += 1
         self.total_control_steps += 1
         self.ego = extract_ego(self.md, self.road, self.episode_control_steps * self.dt)
-        self.objects = self._extract_objects()
+        self._extract_objects()
         total, raw, weighted = self.reward.step(prev, self.ego, info, self.objects)
         self._log_step(u, diag, total, raw, weighted)
         info["reward_terms"] = raw
         if self.on_step is not None:
             self.on_step(self, diag)
-        return self._obs(raw_obs), total, bool(terminated), bool(truncated), info
+        return self._obs(), total, bool(terminated), bool(truncated), info
 
     def _log_step(self, u, diag: dict, total: float, raw: dict, weighted: dict) -> None:
         gaps = [box_gap(self.ego, o) for o in self.objects]
@@ -269,16 +329,22 @@ class DrivingEnv(gym.Env):
                 h = float(self.road.heading_at(self.road.to_frenet(*veh.position)[0]))
                 veh.set_velocity([v * np.cos(h), v * np.sin(h)])
 
-    def _extract_objects(self) -> ObjectList:
-        return extract_objects(self.md, self.road, self.radius, [veh for veh, _ in self.scripted_cars])
+    def _extract_objects(self) -> None:
+        """env.seen (observation range) and env.objects (perception range: what the controllers see)."""
+        e = self.ego
+        self.seen = extract_objects(self.md, self.road, max(self.obs_range, self.radius),
+                                    [veh for veh, _ in self.scripted_cars])
+        self.objects = [o for o in self.seen if np.hypot(o.x - e.x, o.y - e.y) <= self.radius]
 
-    def _obs(self, raw_obs) -> dict:
+    def _obs(self) -> dict:
         e, road = self.ego, self.road
-        values = {"v": e.v / self.v_max, "d": (e.d - road.d_center) / road.half_width, "psi_err": e.psi_err,
-                  "steering": e.steering, "throttle_brake": e.throttle_brake}
-        ego_vec = np.clip(np.asarray([values[f] for f in self.ego_features], np.float32), -5.0, 5.0)
-        bev = np.ascontiguousarray(np.transpose(np.asarray(raw_obs, np.float32), (2, 0, 1)))
-        return {"bev": bev, "ego": ego_vec}
+        nearest = road.lane_centers[road.nearest_lane(e.d)]
+        values = {"v": e.v / self.v_max, "d": (e.d - road.d_center) / road.half_width,
+                  "lane_offset": (e.d - nearest) / road.lane_width, "psi_err": e.psi_err, "steering": e.steering,
+                  "throttle_brake": e.throttle_brake, "target_lane": float(self.method.target_lane_offset()),
+                  "t_left": 1.0 - self.episode_control_steps / self.horizon_steps}
+        return {"ego": np.clip(np.asarray([values[f] for f in EGO_FEATURES], np.float32), -5.0, 5.0),
+                "lanes": np.clip(lane_features(e, self.seen, road, self.obs_range, self.v_max), -5.0, 5.0)}
 
 
 def make_env(cfg: dict, *, rank: int = 0, run_dir: str | Path | None = None, is_eval: bool = False,

@@ -48,7 +48,7 @@ def _per_decision(cfg: dict, per_step_value: float) -> float:
 
 
 def method_gamma(cfg: dict) -> float:
-    return _per_decision(cfg, cfg["training"]["gamma_ref"])      # M1 0.99, M2 0.951, M3 0.904
+    return _per_decision(cfg, cfg["training"]["gamma_ref"])      # M1 0.999, M2 0.995, M3 0.990
 
 
 def method_gae_lambda(cfg: dict) -> float:
@@ -58,7 +58,6 @@ def method_gae_lambda(cfg: dict) -> float:
 def ppo_kwargs(cfg: dict) -> dict:
     kw = dict(cfg["ppo"])
     kw["policy_kwargs"] = dict(kw.get("policy_kwargs") or {})
-    kw["policy_kwargs"].setdefault("normalize_images", False)   # BEV is already float in [0, 1]
     kw["gamma"] = method_gamma(cfg)
     kw["gae_lambda"] = method_gae_lambda(cfg)
     return kw
@@ -134,18 +133,20 @@ CRITIC_PREFIXES = ("mlp_extractor.value_net.", "value_net.")   # policy state-di
 
 
 def actor_parameters(policy) -> list:
-    """Parameters that set the action: CNN / features extractor (shared with the critic), policy MLP, action head,
-    log_std. Frozen during the critic warm-up."""
+    """Parameters that set the action: features extractor, policy MLP, action head, log_std (continuous actions).
+    Frozen during the critic warm-up."""
     params = (list(policy.features_extractor.parameters()) + list(policy.mlp_extractor.policy_net.parameters())
-              + list(policy.action_net.parameters()) + [policy.log_std])
+              + list(policy.action_net.parameters()))
+    if hasattr(policy, "log_std"):
+        params.append(policy.log_std)
     if not policy.share_features_extractor:
         params += list(policy.pi_features_extractor.parameters())
     return params
 
 
 def warm_start(model, cfg: dict) -> str | None:
-    """Load the actor of ``training.init_policy`` into ``model`` (critic and log_std stay as initialised; log_std is
-    then set from ``training.init_log_std``). Returns a one-line description, or None when no warm start is set."""
+    """Load the actor of ``training.init_policy`` into ``model`` (critic and log_std stay as initialised; see
+    ``init_exploration``). Returns a one-line description, or None when no warm start is set."""
     from handoff.config import REPO_ROOT
 
     tr = cfg["training"]
@@ -164,11 +165,46 @@ def warm_start(model, cfg: dict) -> str | None:
         raise ValueError(f"training.init_policy {path} does not match this policy (wrong method / observation?): "
                          f"missing {missing[:3]}, mismatched {bad[:3]}")
     model.policy.load_state_dict(actor, strict=False)
-    if tr.get("init_log_std") is not None:
+    return f"warm start: actor from {path} ({len(actor)} tensors)"
+
+
+def init_exploration(model, cfg: dict) -> str | None:
+    """Initial exploration, by action type. Returns a one-line description (None if nothing was set).
+
+    Box (M1): ``training.init_log_std``, one number or one per action dimension (null = ppo.policy_kwargs.
+      log_std_init), so each dimension's noise can be sized from what it does to the car.
+    Discrete / MultiDiscrete (M2, M3): ``training.init_default_prob``, one number or one per action component: the
+      initial probability of index 0 (keep lane / v_cap), the rest shared equally by the other choices. Set through
+      the action head's bias (its weights start ~0, so the initial policy is the same for every observation)."""
+    import gymnasium as gym
+
+    tr, policy = cfg["training"], model.policy
+    space = model.action_space
+    if isinstance(space, gym.spaces.Box):
+        init = tr.get("init_log_std")
+        if init is None:
+            return None
+        n = policy.log_std.numel()
+        vals = [float(x) for x in init] if isinstance(init, (list, tuple)) else [float(init)] * n
+        if len(vals) != n:
+            raise ValueError(f"training.init_log_std {init}: the action has {n} dimensions")
         with torch.no_grad():
-            model.policy.log_std.fill_(float(tr["init_log_std"]))
-    std = model.policy.log_std.exp().detach().cpu().numpy().round(3).tolist()
-    return f"warm start: actor from {path} ({len(actor)} tensors), action std {std}"
+            policy.log_std.copy_(torch.as_tensor(vals, dtype=policy.log_std.dtype))
+        return f"initial action std {policy.log_std.exp().detach().cpu().numpy().round(3).tolist()}"
+    nvec = [int(space.n)] if isinstance(space, gym.spaces.Discrete) else [int(x) for x in space.nvec]
+    init = tr.get("init_default_prob")
+    if init is None:
+        return None
+    probs = [float(x) for x in init] if isinstance(init, (list, tuple)) else [float(init)] * len(nvec)
+    if len(probs) != len(nvec):
+        raise ValueError(f"training.init_default_prob {init}: the action has {len(nvec)} components")
+    with torch.no_grad():
+        bias, i = policy.action_net.bias, 0
+        for n, p in zip(nvec, probs):
+            bias[i:i + n] = 0.0
+            bias[i] = float(np.log(p * (n - 1) / (1.0 - p)))   # softmax: p for index 0, (1 - p) / (n - 1) others
+            i += n
+    return f"initial probability of the default action (index 0) {probs}"
 
 
 # ======================================================================================= callback
@@ -288,7 +324,9 @@ class TrainingCallback(BaseCallback):
                              for r in recent])
             msg += (f" | last {len(recent)} ep: return {np.mean([r['return'] for r in recent]):7.1f}, "
                     f"success {np.mean([r['success'] for r in recent]):.2f}, crash {crash:.2f}, "
-                    f"{np.mean([r['mean_speed'] for r in recent]) * 3.6:4.1f} km/h")
+                    f"{np.mean([r['mean_speed'] for r in recent]) * 3.6:4.1f} km/h, "
+                    f"{np.mean([r['distance'] for r in recent]):4.0f} m, "
+                    f"{np.mean([r['sim_time'] for r in recent]):4.1f} s")
         print(msg, flush=True)
 
     def _evaluate(self, final: bool = False) -> None:
@@ -314,7 +352,8 @@ class TrainingCallback(BaseCallback):
             (self.run_dir / "checkpoints" / "best.txt").write_text(f"{tag} success={key[0]:.3f} return={key[1]:.2f}\n")
         if self.verbose:
             print(f"[eval {tag}] success={agg.get('success', 0):.2f} collision={agg.get('collision', 0):.2f} "
-                  f"return={agg.get('return', 0):.1f}")
+                  f"off_road={agg.get('off_road', 0):.2f} return={agg.get('return', 0):.1f} "
+                  f"speed={agg.get('mean_speed', 0) * 3.6:.1f} km/h distance={agg.get('distance', 0):.0f} m")
         self.logger.dump(self.num_timesteps)
 
 
@@ -341,10 +380,12 @@ def train(cfg: dict, run_dir: str | Path | None = None, verbose: int = 1) -> Pat
                            clip_reward=float(tr.get("reward_clip", 10.0)))
     model = PPO("MultiInputPolicy", vec, seed=seed, device=tr.get("device", "auto"), verbose=0, **ppo_kwargs(cfg))
     ws = warm_start(model, cfg)
+    expl = init_exploration(model, cfg)
     if ws:
-        (run_dir / "warm_start.txt").write_text(ws + "\n")
-        if verbose:
-            print(ws)
+        (run_dir / "warm_start.txt").write_text(ws + (f", {expl}" if expl else "") + "\n")
+    for line in (ws, expl):
+        if line and verbose:
+            print(line)
     (run_dir / "device.txt").write_text(f"{model.device} torch={torch.__version__} cuda_available="
                                         f"{torch.cuda.is_available()} threads={torch.get_num_threads()}\n")
     if verbose:

@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Validation: the real M2 / M3 envs (the same code PPO trains) driven by scripted actions instead of a policy.
+"""Validation: the real M2 / M3 envs (the same code PPO trains) driven by scripted decisions instead of a policy.
 
 1. Scenarios (M3, hand-placed waypoints + scripted cars, configs/validation/*.json):
        python scripts/validate.py run configs/validation/overtake.json             # MetaDrive window, real time
@@ -8,13 +8,13 @@
        python scripts/validate.py run <scenario> --no-constraints                 # MPC without the corridor (K)
        python scripts/validate.py run <scenario> --demo                           # road + cars only (M toggles)
        python scripts/validate.py run <scenario> --reward my_reward               # score with configs/my_reward.yaml
-   Every decision (1 s) the next <= 5 placed waypoints more than ds_min ahead go into the RL action exactly as a
-   policy would output them (re-spaced to ds in [5, 40] m, d clipped to the action range), with v* = the scenario's
-   target speed. The run ends on a crash / off-road, when the ego has stood still for 3 s, or 30 m past the last
-   waypoint. A gate emergency brake (method.ebrake.gate, off by default) does not end the run here
+   Every decision (1 s) the next <= 5 placed waypoints more than 5 m ahead (re-spaced to 5-40 m) are flown as M3's
+   plan (M3.plan_waypoints: spline -> corridor -> MPC, the controller the RL's lane plans go through), with v* = the
+   scenario's target speed. The run ends on a crash / off-road, when the ego has stood still for 3 s, or 30 m past
+   the last waypoint. A gate emergency brake (method.ebrake.gate, off by default) does not end the run here
    (method.ebrake.ends_episode=false) so you see the stop; --set method.ebrake.ends_episode=true scores it as the RL
    would (episode ends, collision penalty).
-   The reward the RL would get (configs/r4_straight.yaml by default) is shown live: return so far and each term.
+   The reward the RL would get (configs/r5.yaml by default) is shown live: return so far and each term.
    Writes runs/validation/<scenario>/<timestamp>/: episodes/<id>.npz, <id>_overview.png, <id>_reward.png
    (cumulative return and each term over time), <id>_steps.csv, result.json.
 
@@ -26,8 +26,8 @@
        python scripts/validate.py edit --out configs/validation/my_test.json
        python scripts/validate.py edit --scenario configs/validation/overtake.json
    Left click places (mode buttons: waypoint / car; Shift+click or 'c' always places a car, snapped to the lane
-   centre); right click deletes the nearest. Turn pan/zoom off before placing. Segments the RL cannot produce
-   (spacing outside 5-40 m) are orange; segments needing more lateral acceleration than the MPC allows are red.
+   centre); right click deletes the nearest. Turn pan/zoom off before placing. Segments outside the 5-40 m
+   spacing are orange; segments needing more lateral acceleration than the MPC allows are red.
 
 3. Checks (pass / fail; each in its own process, report in runs/validation/checks/):
        python scripts/validate.py check                 # all
@@ -37,11 +37,13 @@
                                                                 # infeasible_plan, failed_solve
    env        ego dynamics pinned, spawn speed / lane, RoadFrame vs MetaDrive, forced off-road ends the episode,
               determinism (same seed + actions -> identical trajectory; replay relies on it)
-   m2         PID: lane 1 -> 0 -> 2 -> 1 with speed changes, scripted (d*, v*); cross-track / speed tolerances
+   m2         PID: lane 1 -> 0 -> 2 -> 1 with speed changes, scripted targets; cross-track / speed tolerances
    m3         passes a 35 km/h lead; stops for a stopped car in its lane; undrivable waypoints (lane change
               5 m ahead) are flagged but flown: the run goes on and the car reaches the lane; a solver that
               keeps failing replays its plan, then holds speed and lane (never brakes or ends the run) and
               recovers once the solver works
+   lanes      M2 / M3 lane commands: LEFT reaches lane 0, commands mid lane change are ignored, edges saturate,
+              the observation's target_lane feature; a car placed ahead shows up in the lane features
    smoke      M1 / M2 / M3 complete random-action episodes; logs consistent (terms, returns, decision counts)
    b0         B0 completes every evaluation seed through the evaluator
    train      PPO entry point end to end for a few hundred control steps per method (plumbing, not learning)
@@ -62,7 +64,7 @@ from pathlib import Path
 
 import numpy as np
 
-from handoff.config import REPO_ROOT, kmh, load_config
+from handoff.config import DEFAULT_REWARD, REPO_ROOT, kmh, load_config
 
 SCENARIO_DIR = REPO_ROOT / "configs" / "validation"
 OUT = REPO_ROOT / "runs" / "validation"
@@ -78,7 +80,7 @@ def load_scenario(path) -> dict:
     return sc
 
 
-def scenario_config(sc: dict, overrides=(), reward: str = "r4_straight") -> dict:
+def scenario_config(sc: dict, overrides=(), reward: str = DEFAULT_REWARD) -> dict:
     """M3 config for a scenario: no traffic, fixed spawn, no time limit, solid lines do not end the run."""
     return load_config("m3", reward=reward, overrides=[
         "scenario.traffic.density=0", f"sim.ego.spawn_lane={int(sc['ego_lane'])}",
@@ -108,17 +110,31 @@ def controlled_env(method: str, ego_lane: int, ego_kmh: float, overrides=(), run
     return env
 
 
-def scripted_action(method, ego_s: float, placed: np.ndarray, v: float) -> np.ndarray:
-    """What the RL could output now: the next <= n_slots placed waypoints ahead, re-spaced like ``decode``."""
-    lo, hi = method.ds_range
+WP_SLOTS, WP_DS = 5, (5.0, 40.0)   # scenario waypoints flown per decision, and their spacing range (m)
+
+
+def step_with(env, decide):
+    """One env step with a scripted decision (``decide() -> decision dict``) in place of the RL's."""
+    env.method.decide = lambda _action: decide()
+    return env.step(np.zeros(env.action_space.shape, np.int64))
+
+
+def ahead_waypoints(env, ds: list[float], d: list[float]) -> np.ndarray:
+    """(s, d) waypoints at cumulative spacings ``ds`` from the ego."""
+    return np.stack([env.ego.s + np.cumsum(ds), d], axis=1)
+
+
+def scenario_waypoints(ego_s: float, placed: np.ndarray) -> np.ndarray:
+    """The next <= WP_SLOTS placed waypoints ahead, re-spaced to WP_DS."""
+    lo, hi = WP_DS
     ahead = placed[placed[:, 0] > ego_s + lo]
     if len(ahead) == 0:   # past the last one: keep straight on at its offset
         ahead = np.array([[ego_s + hi, placed[-1, 1]]])
-    ds, prev = [], ego_s
-    for s, _ in ahead[: method.n_slots]:
-        ds.append(float(np.clip(s - prev, lo, hi)))
-        prev += ds[-1]
-    return method.encode(ds, list(ahead[: method.n_slots, 1]), v)
+    s, prev = [], ego_s
+    for si, _ in ahead[:WP_SLOTS]:
+        prev += float(np.clip(si - prev, lo, hi))
+        s.append(prev)
+    return np.stack([s, ahead[:WP_SLOTS, 1]], axis=1)
 
 
 def cmd_run(args) -> dict:
@@ -144,8 +160,10 @@ def cmd_run(args) -> dict:
         viewer = Viewer(fps=args.fps, allow_constraint_toggle=True, show_return=True)
         viewer.show = not args.demo
 
+    method.decide = lambda _action: method.plan_waypoints(scenario_waypoints(env.ego.s, placed), v_target)
+
     def act(_obs):
-        return scripted_action(method, env.ego.s, placed, v_target)
+        return 0
 
     def stop():
         v = env.recorder.steps["v"][-30:]
@@ -205,7 +223,7 @@ def cmd_edit(args):
     road, ego0 = env.road, env.ego
     env.close()
     m = cfg["method"]
-    ds_lo, ds_hi = m["ds_range"]
+    ds_lo, ds_hi = WP_DS
     a_lat_max = float(m["mpc"]["max_lat_accel"])
 
     wps = [tuple(w) for w in sc["waypoints"]]
@@ -368,7 +386,7 @@ def cmd_edit(args):
 
 # ======================================================================================= checks
 # Generous on purpose: these catch a broken controller, not tune one. The steady limit stays inside the reward's
-# in-lane zone (reward.LANE_ZONE = 0.57 m).
+# in-lane zone used before the smooth lane_keep term (0.57 m).
 PID_TOL_LANE_CHANGE = 1.0    # m, max cross-track error during a lane change
 PID_TOL_STEADY = 0.5         # m, cross-track error once settled
 PID_TOL_SPEED = 1.0          # m/s, speed error once settled
@@ -417,7 +435,7 @@ def check_env() -> dict:
 
     cfg = load_config("m3")              # determinism: same seed + actions -> identical trajectory
     env = make_env(cfg, is_eval=True)
-    actions = np.random.default_rng(1).uniform(-1, 1, (25, env.action_space.shape[0]))
+    actions = np.random.default_rng(1).integers(0, 3, 25)    # random lane commands
     trajs = []
     for _ in range(2):
         env.reset(options={"episode_seed": cfg["scenario"]["seeds"]["eval"][3]})
@@ -440,11 +458,12 @@ def check_m2() -> dict:
     env = controlled_env("m2", ego_lane=1, ego_kmh=54.0, label="m2: lanes 1 -> 0 -> 2 -> 1, speed steps")
     env.reset(options={"episode_seed": 0})
     L = env.road.lane_centers
-    plan = [(L[1], kmh(60), 6), (L[0], kmh(60), 10), (L[2], kmh(70), 14), (L[1], kmh(50), 10)]
+    plan = [(1, kmh(60), 6), (0, kmh(60), 10), (2, kmh(70), 14), (1, kmh(50), 10)]
     rows = []
-    for d_star, v_star, n_dec in plan:
+    for lane, v_star, n_dec in plan:
+        d_star = L[lane]
         for j in range(n_dec):
-            _, _, te, tr, _ = env.step(env.method.encode(d_star, v_star))
+            _, _, te, tr, _ = step_with(env, lambda lane=lane, v=v_star: env.method.set_target(lane, v))
             cte = env.recorder.steps["tracking_error"][-env.method.period:]
             rows.append((j, d_star, v_star, env.ego.d, env.ego.v, cte))
             if te or tr:
@@ -475,7 +494,8 @@ def m3_pass_lead() -> dict:
     for _ in range(80):
         d_tgt = L[0] if lead_s() - env.ego.s > -15 else L[1]
         d_mid = 0.5 * (env.ego.d + d_tgt)     # spread each lane change over two 40 m segments (drivable at 70 km/h)
-        _, _, te, tr, info = env.step(env.method.encode([40.0, 40.0], [d_mid, d_tgt], kmh(70)))
+        _, _, te, tr, info = step_with(env, lambda d_mid=d_mid, d_tgt=d_tgt: env.method.plan_waypoints(
+            ahead_waypoints(env, [40.0, 40.0], [d_mid, d_tgt]), kmh(70)))
         passed |= env.ego.s > lead_s() + 20
         if te or tr:
             reason = info["termination"]
@@ -502,7 +522,8 @@ def m3_stopped_car() -> dict:
     env.add_scripted_car(170.0, L[1])
     reason = None
     for _ in range(40):
-        _, _, te, tr, info = env.step(env.method.encode([25.0, 25.0], [L[1], L[1]], kmh(50)))
+        _, _, te, tr, info = step_with(env, lambda: env.method.plan_waypoints(
+            ahead_waypoints(env, [25.0, 25.0], [L[1], L[1]]), kmh(50)))
         if te or tr:
             reason = info["termination"]
             break
@@ -524,7 +545,8 @@ def m3_infeasible_plan() -> dict:
     L = env.road.lane_centers
     reason, flags, peak = None, [], 0.0
     for _ in range(8):
-        _, _, te, tr, info = env.step(env.method.encode([5.0], [L[0]], kmh(60)))
+        _, _, te, tr, info = step_with(env, lambda: env.method.plan_waypoints(
+            ahead_waypoints(env, [5.0], [L[0]]), kmh(60)))
         flags.append(not env.decision["feasible"])
         peak = max(peak, env.decision["lat_accel"])
         if te or tr:
@@ -549,15 +571,19 @@ def m3_failed_solve() -> dict:
     env = controlled_env("m3", ego_lane=1, ego_kmh=60.0, label="m3 (d) solver forced to fail")
     env.reset(options={"episode_seed": 0})
     L = env.road.lane_centers
-    act = env.method.encode([30.0], [L[1]], kmh(60))
-    env.step(act)
+    m = env.method
+
+    def act():
+        return step_with(env, lambda: m.plan_waypoints(ahead_waypoints(env, [30.0], [L[1]]), kmh(60)))
+
+    act()
     healthy = int(np.sum(env.recorder.steps["fallback"]))
     mpc = env.method.mpc
     real, mpc.solver = mpc.solver, broken
     reason, v0 = None, env.ego.v
     n_dec = (mpc.replay["timeout"] + 5) // env.method.period + 1      # long enough to use up the replay budget
     for _ in range(n_dec):
-        _, _, te, tr, info = env.step(act)
+        _, _, te, tr, info = act()
         if te or tr:
             reason = info["termination"]
             break
@@ -565,7 +591,7 @@ def m3_failed_solve() -> dict:
     expected = {"hold_lane"} | ({"shifted_previous"} if mpc.replay["timeout"] > 0 else set())
     v_hold = env.ego.v
     mpc.solver = real
-    env.step(act)
+    act()
     res = {"healthy_fallbacks": healthy, "modes_seen": sorted(modes), "modes_expected": sorted(expected),
            "termination": reason, "v_before_kmh": v0 * 3.6, "v_after_hold_kmh": v_hold * 3.6,
            "recovered": not env.recorder.steps["fallback"][-1]}
@@ -588,6 +614,45 @@ def check_m3(cases=None) -> dict:
     return out
 
 
+def check_lanes() -> dict:
+    from handoff.env import EGO_FEATURES, LANE_SLOT
+    from handoff.reference import LEFT, RIGHT
+
+    out = {}
+    for method in ("m2", "m3"):
+        env = controlled_env(method, ego_lane=1, ego_kmh=70.0, label=f"lanes: {method} LEFT, then RIGHT x2")
+        obs, _ = env.reset(options={"episode_seed": 0})
+        L = env.road.lane_centers
+        keep = [0, 0] if method == "m2" else 0
+        cmd = (lambda c: [c, 0]) if method == "m2" else (lambda c: c)
+        i_tl = EGO_FEATURES.index("target_lane")
+        obs, _, te, tr, _ = env.step(cmd(LEFT))
+        target_feature = float(obs["ego"][i_tl])                # mid lane change: target is one lane to the left
+        obs, _, te, tr, _ = env.step(cmd(RIGHT))                # ignored: still changing lanes
+        ignored = env.method.lane.lane == 0
+        for _ in range(int(8.0 / (env.method.period * env.dt))):
+            obs, _, te, tr, _ = env.step(keep)
+            if te or tr:
+                break
+        in_lane0 = abs(env.ego.d - L[0]) < 0.3
+        env.step(cmd(LEFT))                                     # saturates: already the leftmost lane
+        saturated = env.method.lane.lane == 0
+        car_s = env.ego.s + 40.0
+        env.add_scripted_car(car_s, L[0], 0.0)
+        obs, _, _, _, _ = env.step(keep)
+        own_ahead = obs["lanes"][1 + 2 * len(LANE_SLOT) + 1: 1 + 2 * len(LANE_SLOT) + 1 + len(LANE_SLOT)]
+        sees_car = bool(own_ahead[0] == 1.0 and 0.0 < own_ahead[1] < 0.45)
+        env.close()
+        res = {"target_feature_mid_change": target_feature, "right_ignored_mid_change": ignored,
+               "in_lane_0": in_lane0, "final_d": env.ego.d, "left_saturates": saturated,
+               "car_ahead_in_obs": sees_car, "own_lane_ahead_slot": [round(float(x), 3) for x in own_ahead],
+               "terminated": bool(te or tr)}
+        res["ok"] = bool(target_feature == 1.0 and ignored and in_lane0 and saturated and sees_car and not (te or tr))
+        out[method] = res
+    out["ok"] = all(v["ok"] for v in out.values())
+    return out
+
+
 def check_smoke(n_episodes: int = 2) -> dict:
     from handoff.env import make_env
     from handoff.logs import load_episode
@@ -599,12 +664,12 @@ def check_smoke(n_episodes: int = 2) -> dict:
         run_dir = OUT / "checks" / "smoke" / method
         shutil.rmtree(run_dir, ignore_errors=True)
         env = make_env(cfg, run_dir=run_dir, is_eval=True)
-        rng = np.random.default_rng(0)
+        env.action_space.seed(0)
         sums, t0 = [], time.time()
         for ep in range(n_episodes):
             env.reset(options={"episode_seed": cfg["scenario"]["seeds"]["eval"][ep]})
             while True:
-                _, r, te, tr, info = env.step(rng.uniform(-1, 1, env.action_space.shape))
+                _, r, te, tr, info = env.step(env.action_space.sample())
                 assert np.isfinite(r)
                 if te or tr:
                     sums.append(info["episode_summary"])
@@ -693,8 +758,8 @@ def check_scenarios() -> dict:
     return out
 
 
-CHECKS = {"env": check_env, "m2": check_m2, "m3": check_m3, "smoke": check_smoke, "b0": check_b0,
-          "train": check_train, "scenarios": check_scenarios}
+CHECKS = {"env": check_env, "m2": check_m2, "m3": check_m3, "lanes": check_lanes, "smoke": check_smoke,
+          "b0": check_b0, "train": check_train, "scenarios": check_scenarios}
 
 
 def run_check(name: str) -> dict:
@@ -740,7 +805,7 @@ def main():
     r.add_argument("--no-render", action="store_true", help="headless (logs + plots only)")
     r.add_argument("--no-constraints", action="store_true", help="start with the corridor constraints off (K)")
     r.add_argument("--demo", action="store_true", help="only the road and the cars; M toggles the overlays")
-    r.add_argument("--reward", default="r4_straight", help="configs/<name>.yaml (shown live + plotted)")
+    r.add_argument("--reward", default=DEFAULT_REWARD, help="configs/<name>.yaml (shown live + plotted)")
     r.add_argument("--out", default=None, help="default runs/validation/<scenario>/<timestamp>")
     e = sub.add_parser("edit", help="place waypoints and cars")
     e.add_argument("--scenario", default=None, help="existing scenario JSON to edit")

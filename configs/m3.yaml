@@ -1,29 +1,28 @@
-# M3: RL picks up to 5 waypoints + a speed v* every 1 s; spline -> road corridor -> MPC, with the emergency-brake
-# gate (src/handoff/m3.py, src/handoff/mpc.py).
+# M3: RL picks a lane command every 1 s (KEEP / LEFT / RIGHT); lane plan -> road corridor -> MPC, which owns speed
+# (toward v_cap) and braking for cars; the emergency-brake gate is off (src/handoff/m3.py, src/handoff/mpc.py).
 experiment:
   method: m3
 
 method:
   name: m3
   decision_period: 10          # control steps per RL decision (1.0 s)
-  n_slots: 5                   # waypoint slots; the count channel picks how many are used (k = 1..5)
-  ds_range: [5.0, 40.0]        # per-slot spacing along the road (m)
-  lateral_margin: 1.0          # waypoint d range = [right edge - margin, left edge + margin]
-  speed_range_km_h: [20.0, 80.0]  # RL speed channel v*: spline speed, corridor ramp, MPC target AND hard speed
-                               # ceiling. Floor 20 km/h: slowing below that for traffic is the corridor / MPC's job.
-  spline:
+  lane_plan:                   # reference.LanePlan, built when the target lane changes
+    duration: 2.5              # s of travel per lane change (~56 m at 80 km/h; one lane peaks ~3.2 m/s^2)
+    max_lat_accel: 5.0         # m/s^2: a plan is lengthened until its peak is within this
+    min_length: 15.0           # m, shortest plan (slow speeds)
+    ahead: 150.0               # m of reference past the plan's end (covers the 5 s MPC horizon at 80 km/h)
+  spline:                      # reference sampling (ds); extend: validation waypoint splines (plan_waypoints) only
     ds: 1.0                    # path sample spacing (m)
     extend: 80.0               # path continues flat beyond the last waypoint (m)
   ebrake:
     gate: false                # true: emergency-brake (full brake, no MPC solve, ends the episode) when a car in the
-                               # planned path (line ego -> next waypoint crosses its keep-out zone) is closed on faster
+                               # planned path (line ego -> next plan point crosses its keep-out zone) is closed on faster
                                # than gate_decel allows. Off: braking for cars is the MPC's job (corridor front face,
                                # accel down to -8 m/s^2); the gate pre-empted it at 6 m/s^2 and ended runs it could save
     gate_decel: 6.0            # m/s^2; fires when dv^2 / (2 gap) exceeds this
     ends_episode: true         # the gate (if on) ends the episode as "emergency_brake" with the collision penalty;
-                               # false (validate.py run): the car brakes and the run goes on. Infeasible waypoints
-                               # (peak spline lateral accel > mpc.max_lat_accel) never end it (2026-11-22): logged
-                               # (infeasible_count) and flown as asked; MPC solve failures never end it (mpc.py)
+                               # false (validate.py run): the car brakes and the run goes on. MPC solve failures
+                               # never end it (mpc.py)
   corridor:                    # road-aligned boxes on the ego centre, one per MPC stage, rebuilt every control step
     inset: -0.3                # lateral faces = exterior lane centres pulled in by this (negative = wider): [-7.3, 0.3]
     keepout_s: 1.0             # car keep-out zone: car + keepout_s fore / aft (m); also used by the gate
@@ -52,7 +51,7 @@ method:
       inner_weight: 10.0
       inner_dist: 0.25         # m from the face where the inner 1/gap^2 barrier starts
     accel_bounds: [-8.0, 2.5]  # m/s^2 (-8 is about where MetaDrive braking stops being linear)
-    max_lat_accel: 9.3         # m/s^2, |v^2 tan(delta) / L| bound; also the waypoint feasibility limit (m3.py).
+    max_lat_accel: 9.3         # m/s^2, |v^2 tan(delta) / L| bound; also the validation waypoint check (m3.py).
                                # 9.3 = the peak of the human demos (keyboard lane changes); was 4.0 (comfort).
                                # Near MetaDrive's grip (wheel_friction 0.9 -> ~8.8 m/s^2 on a friction circle):
                                # the kinematic model does not see skidding, so expect some tracking loss up there
@@ -73,12 +72,14 @@ method:
       tol: 0.001
       print_level: 0
 
-training:                      # 7 h of training (M3's final eval takes longer): ~93 steps/s on standard
-  total_control_steps: 2300000
+training:                      # 7 h of training (M3's final eval takes longer); the wall clock is the real stop
+  total_control_steps: 10000000
   max_wall_minutes: 420
+  init_default_prob: 0.9       # keep lane; a lane change tried every ~10 s at first
 
 ppo:
   n_steps: 128                 # decisions per env per rollout (= 128 s of driving, same as M1 / M2)
   batch_size: 256
   n_epochs: 4                  # round 2 (r3_fast) ran at approx_kl ~0.05, clip fraction 0.4-0.49: too large, though
   target_kl: 0.03              # it did not collapse; same guard as M1 / M2
+  ent_coef: 0.01               # discrete actions: a small entropy bonus keeps lane changes in play

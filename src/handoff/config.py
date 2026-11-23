@@ -72,7 +72,10 @@ def apply_overrides(cfg: dict, overrides: list[str] | None) -> dict:
     return cfg
 
 
-def load_config(method: str, reward: str = "r4_straight", scenario: str = "freeway",
+DEFAULT_REWARD = "r5"   # configs/<name>.yaml
+
+
+def load_config(method: str, reward: str = DEFAULT_REWARD, scenario: str = "freeway",
                 overrides: list[str] | None = None) -> dict:
     """The fully merged config for one run."""
     cfg = load_yaml(CONFIG_DIR / "base.yaml")
@@ -86,14 +89,14 @@ def load_config(method: str, reward: str = "r4_straight", scenario: str = "freew
 
 def load_run_config(run_dir: str | Path, overrides: list[str] | None = None) -> dict:
     """Config a training run used (``<run_dir>/config.yaml``), on top of today's defaults for that method so keys
-    added since the run have a value. The reward is the run's own, whole (no new terms mixed into an old reward), so
-    runs trained under a reward whose file has since been removed still evaluate as they were trained."""
+    added since the run have a value. (Runs from before the lane / ground-truth observation change, 2026-11-23,
+    have a different observation and action space and no longer load.) The reward is the run's own, whole (no
+    new terms mixed into an old reward), so runs trained under a reward whose file has since been removed still
+    evaluate as they were trained."""
     saved = load_yaml(Path(run_dir) / "config.yaml")
     exp = saved["experiment"]
     cfg = deep_merge(load_config(exp["method"], scenario=exp.get("scenario", "freeway")), saved)
     cfg["reward"] = saved["reward"]
-    if exp["method"] == "m1" and "accel_range" not in saved.get("method", {}):
-        cfg["method"]["accel_range"] = None     # trained before the accel re-map: raw throttle_brake
     return apply_overrides(cfg, overrides)
 
 
@@ -114,7 +117,7 @@ def run_dir_of(checkpoint: str | Path) -> Path:
 # --------------------------------------------------------------------------------------- script arguments
 def add_config_args(p: argparse.ArgumentParser, method_required: bool = True) -> None:
     p.add_argument("--method", required=method_required, choices=METHODS)
-    p.add_argument("--reward", default="r4_straight", help="configs/<name>.yaml")
+    p.add_argument("--reward", default=DEFAULT_REWARD, help="configs/<name>.yaml")
     p.add_argument("--scenario", default="freeway", help="configs/<name>.yaml")
     p.add_argument("--seed", type=int, default=None, help="experiment.seed override")
     p.add_argument("--set", dest="overrides", action="append", default=[], metavar="KEY=VALUE",

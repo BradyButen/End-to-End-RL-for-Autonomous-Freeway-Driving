@@ -1,11 +1,11 @@
 #!/usr/bin/env python
 """Analysis plots.
 
-    python scripts/plot.py curves runs/m*/r4_straight/seed_*/* --metric success --x control_steps --out curves.png
-    python scripts/plot.py table runs/*/r4_straight/seed_*/*/final_eval/episodes.csv runs/eval/b0/episodes.csv
+    python scripts/plot.py curves runs/m*/r5/seed_*/* --metric success --x control_steps --out curves.png
+    python scripts/plot.py table runs/*/r5/seed_*/*/final_eval/episodes.csv runs/eval/b0/episodes.csv
     python scripts/plot.py episode runs/.../episodes/<id>.npz      # <id>_overview.png + <id>_steps.csv
     python scripts/plot.py reward runs/.../episodes/<id>.npz       # how the return built up (<id>_reward.png)
-    python scripts/plot.py reward <id>.npz --reward r4             # re-scored with configs/r4.yaml
+    python scripts/plot.py reward <id>.npz --reward r5             # re-scored with configs/r5.yaml
 """
 
 import argparse

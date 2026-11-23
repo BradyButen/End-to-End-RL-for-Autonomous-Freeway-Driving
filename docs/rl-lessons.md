@@ -1,8 +1,8 @@
-# RL training: what the runs taught (2026-11-21)
+# RL training: what the runs taught (2026-11-21 to 11-23)
 
 Learning notes from round 3 (Great Lakes) and the laptop trials. Each item: what we saw, the cause, the fix, and
 the general lesson. Related: `docs/m2-reference-timing.md` (M2 label timing), `docs/m3-mpc-lessons.md` (M3
-controller), `docs/human-data-pipeline.md` (demos, cloning, warm start).
+controller), `docs/warm-start.md` (demos, cloning, warm start).
 
 ## 1. Read the eval logs before trusting "best"
 
@@ -68,7 +68,7 @@ Lesson: cloning works when the controller under the policy supplies the safety-c
 policy itself must learn when to brake or change lanes from a few thousand camera frames (M1, M2), the clone mostly
 provides speed and road-following, and corrective data (DAgger) is the next step.
 
-Great Lakes batch (`docs/TRAINING.md` §8) confirmed it: warm M2 went 22 % → 100 % (from scratch it collapsed), warm M3
+Great Lakes batch (`docs/TRAINING.md` §5) confirmed it: warm M2 went 22 % → 100 % (from scratch it collapsed), warm M3
 held 100 %, warm M1 reached 25 % but never brakes. And a new lesson: a warm start with low noise converges to the
 *nearest safe* behaviour — M2 and M3 both settled on following 40 km/h traffic and never discovered passing.
 
@@ -111,7 +111,43 @@ For "drive as fast as possible without crashing" (2026-11-22), re-scoring the lo
   crawling (−5350) and standing still (−9450) now score below a crash (−4000). Fine for M2 / M3 (they never stand
   still); watch early M1. Fix if needed: charge a crash the speed penalty it skips, rather than a bigger constant.
 
-## 11. Operations (Great Lakes)
+## 11. The discount decides what "worse" means
+
+§10 ranks outcomes by episode totals, where crawling (−5350) is worse than crashing (−4000). PPO does not optimise
+totals: with `gamma_ref` 0.99 per 0.1 s it looks ~10 s ahead, and over 10 s crawling at 4 km/h costs ~−570 while a
+crash costs −4000. A warm-started M1 that crashed on ~80 % of its noisy episodes learned to crawl at 4 km/h within
+250k steps (laptop trial, 2026-11-23): driving only beats crawling if the crash risk over the next ~10 s is below
+~14 %. Lesson: rank outcomes by their *discounted* value over the horizon, not by episode totals. A longer horizon
+(0.998, ~50 s) needs a time-left feature in the observation, since the value then depends on how much episode is left.
+
+## 12. Shape the per-step reward so neither escape pays
+
+Two escapes kept appearing, and each fix for one opened the other (laptop M1, 2026-11-23):
+* **Crawling** wins when slow driving costs little: r4 with a ~10 s discount; a positive (v / v_max)² alone, which is
+  flat near 0 (4 km/h earned 0.003 per step, so going a little faster earned nothing and the policy stayed slow).
+* **Quitting** wins when every step costs: a time cost plus a big quadratic speed penalty with a −100 crash. Once
+  the policy could not finish, each second alive was a loss, and it learned to drive off the road within ~5 s.
+The shape that closes both: per-step reward **positive for normal driving** (progress + a big quadratic speed
+reward), **negative only at crawl speeds** (a smaller quadratic shortfall), net +4.5 /s at 80 km/h, 0 at ~28 km/h,
+−2 /s stopped, with a crash (−200) worse than any finish but better than crawling to the timeout (~−265). Lesson:
+check the sign of the per-step reward along the behaviours the policy can fall into, not only the episode totals.
+
+## 13. Exploration noise has physical units
+
+M1 from scratch (laptop, 2026-11-23): deterministic evals improved quickly (0 → 35 % success at 100k steps, ~40 km/h)
+while the *training* episodes left the road within 20–40 m and then crawled. PPO's noise is white: std 0.5 on the
+steering action = ±20° of wheel, resampled every 0.1 s; the noisy policy only survives slowly. Spawned at 80 km/h it
+was worse: lane keeping needs ±1–2° there, so nearly the whole raw steering range (±40°) means "leave the road".
+Tried: a per-dimension initial std (steering 0.05, accel 0.5) and steering as a target lateral acceleration
+(±6 m/s², wheel angle from the current speed). Lesson: size exploration noise per action dimension from what it does
+to the plant at the control rate, and make an action's range mean the same physical thing at every speed (§4).
+
+Batch 6 (2026-11-23) brought back, in a single code path: M1's lateral-acceleration steering and per-dimension
+noise (§13), a ground-truth observation (lane-structured, `DESIGN.md` §3), and lane commands for M2 / M3 (discrete,
+M3's MPC owns speed), and then (after laptop M1 trials under r4 crawled and crashed in turn) `r5` (progress + quadratic speed reward, a smaller quadratic shortfall, crash −200),
+gamma 0.998 + `t_left` and a smooth lane term. Not brought back: the IDM gap keeper, the curriculum, 80 km/h spawns. The 11-23 experiments are on the local branch `archive/2026-11-23-session`.
+
+## 14. Operations (Great Lakes)
 
 * The class account runs **2 jobs at a time** (`AssocMaxJobsLimit`), in submission order — list the jobs you care
   about first.

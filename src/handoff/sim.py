@@ -1,7 +1,8 @@
 """Everything about the simulator: MetaDrive setup, the road (Frenet) frame, ego / car state, traffic speeds,
 scripted cars and the throttle/brake <-> acceleration table. No RL and no controllers here.
 
-MetaDrive is used stock (configured, never patched): the TopDownMetaDrive env with its multi-channel BEV, its PG
+MetaDrive is used stock (configured, never patched): MetaDriveEnv (its own observation is ignored: the policy's is
+built from ground-truth state in env.py), its PG
 map ("S" blocks = straight road, block lengths drawn from the seed), its PGTrafficManager (IDM cars) and its own
 success / crash / out-of-road rules.
 
@@ -16,7 +17,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
-os.environ.setdefault("SDL_VIDEODRIVER", "dummy")  # headless pygame for the BEV observation
+os.environ.setdefault("SDL_VIDEODRIVER", "dummy")  # headless pygame
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 os.environ.setdefault("SDL_AUDIODRIVER", "dummy")  # no audio device on servers / WSL
 
@@ -35,7 +36,7 @@ def make_metadrive_config(cfg: dict, render: bool = False, agent_policy=None) ->
     from metadrive.manager.traffic_manager import TrafficMode
     from metadrive.policy.env_input_policy import EnvInputPolicy
 
-    sim, bev, traffic = cfg["sim"], cfg["observation"]["bev"], cfg["scenario"]["traffic"]
+    sim, traffic = cfg["sim"], cfg["scenario"]["traffic"]
     seeds = cfg["scenario"]["seeds"]
     spawn_lane = sim["ego"].get("spawn_lane")            # None = random lane every episode
     clean = render and bool(sim.get("render_clean", False))   # no MetaDrive navigation marks / dashboard
@@ -68,12 +69,6 @@ def make_metadrive_config(cfg: dict, render: bool = False, agent_policy=None) ->
         ),
         on_continuous_line_done=sim["on_continuous_line_done"],
         out_of_route_done=False,
-        norm_pixel=True,
-        frame_skip=bev["frame_skip"],
-        frame_stack=bev["frame_stack"],
-        post_stack=bev["post_stack"],
-        resolution_size=bev["resolution"],
-        distance=float(bev["distance"]),
         agent_policy=agent_policy or EnvInputPolicy,
         show_logo=False,
         show_fps=render and not clean,
@@ -90,9 +85,9 @@ def make_metadrive_config(cfg: dict, render: bool = False, agent_policy=None) ->
 
 
 def make_metadrive_env(cfg: dict, render: bool = False, agent_policy=None):
-    from metadrive.envs.top_down_env import TopDownMetaDrive
+    from metadrive.envs.metadrive_env import MetaDriveEnv
 
-    return TopDownMetaDrive(make_metadrive_config(cfg, render=render, agent_policy=agent_policy))
+    return MetaDriveEnv(make_metadrive_config(cfg, render=render, agent_policy=agent_policy))
 
 
 def build_road_frame(md) -> RoadFrame:

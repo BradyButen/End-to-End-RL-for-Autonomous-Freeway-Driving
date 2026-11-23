@@ -6,7 +6,7 @@ the ego's controls come from you. Real time (10 Hz).
 
     python scripts/drive.py                          # eval seed 1000
     python scripts/drive.py --seeds 1003 1027        # one episode per seed, back to back
-    python scripts/drive.py --reward my_reward       # drive under configs/my_reward.yaml instead of r4_straight
+    python scripts/drive.py --reward my_reward       # drive under configs/my_reward.yaml instead of r5
     python scripts/drive.py --controller xbox        # gamepad (or wheel); falls back to the keyboard
 
 Keys: W throttle, S brake, A / D steer (click the window first). X = end the episode, M = text / trail on / off.
@@ -15,7 +15,7 @@ Avoid T (MetaDrive's expert takeover), R (reset) and Esc (quits without saving).
 The text panel shows the return so far and each term's share, updated every 0.1 s. After each episode:
 runs/drive/<timestamp>/episodes/<id>.npz (full log) and <id>_reward.png (cumulative return and each term over time,
 reward per second, speed and lane), and the breakdown is printed. Re-score a drive under another reward without
-driving again:  python scripts/plot.py reward runs/drive/<ts>/episodes/<id>.npz --reward r4
+driving again:  python scripts/plot.py reward runs/drive/<ts>/episodes/<id>.npz --reward r5
 """
 
 import argparse
@@ -23,11 +23,13 @@ import os
 import time
 from pathlib import Path
 
+from handoff.config import DEFAULT_REWARD
+
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--seeds", nargs="+", type=int, default=[1000], help="MetaDrive seeds (map + traffic)")
-    p.add_argument("--reward", default="r4_straight", help="configs/<name>.yaml")
+    p.add_argument("--reward", default=DEFAULT_REWARD, help="configs/<name>.yaml")
     p.add_argument("--controller", default="keyboard", choices=["keyboard", "xbox", "wheel"])
     p.add_argument("--set", dest="overrides", action="append", default=[], metavar="KEY=VALUE")
     p.add_argument("--out", default=None, help="default runs/drive/<timestamp>")

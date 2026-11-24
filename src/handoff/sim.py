@@ -298,6 +298,7 @@ class TrafficSpeeds:
         self.base = None if ts is None else float(ts)
         self.offsets = [float(x) for x in traffic_cfg.get("lane_speed_offset_km_h") or []]
         self.release_all_at_reset = bool(traffic_cfg.get("release_all_at_reset", False))
+        self.lane_change = bool(traffic_cfg.get("lane_change", True))
 
     def speed_kmh(self, veh) -> float:
         v = self.base
@@ -325,12 +326,15 @@ class TrafficSpeeds:
 
     def apply(self, md) -> None:
         """Set each traffic car's IDM cruise speed from its current lane. IDMPolicy resets ``target_speed`` from
-        ``NORMAL_SPEED`` every step; set per policy instance, so B0's ego IDM keeps its own."""
-        if self.base is None:
-            return
+        ``NORMAL_SPEED`` every step; set per policy instance, so B0's ego IDM keeps its own. Same for lane changes
+        (``lane_change: false`` turns them off for traffic only)."""
         engine = md.engine
         for veh in engine.traffic_manager._traffic_vehicles:
             pol = engine.get_policy(veh.id)
+            if pol is not None and not self.lane_change:
+                pol.enable_lane_change = False
+            if self.base is None:
+                continue
             v = self.speed_kmh(veh)
             if pol is not None and getattr(pol, "NORMAL_SPEED", None) != v:
                 pol.NORMAL_SPEED = v

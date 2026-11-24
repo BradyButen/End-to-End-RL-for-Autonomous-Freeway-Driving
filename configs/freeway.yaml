@@ -12,6 +12,7 @@ scenario:
     lane_speed_offset_km_h: [5, 0, -5]   # added per lane (0 = left, by the centre line): 45 / 40 / 35 km/h
     mode: Trigger         # MetaDrive TrafficMode: Trigger = random positions over every block but the first
     release_all_at_reset: true   # all cars drive from t = 0 at speed_km_h (no waiting for the ego to reach a block)
+    lane_change: true     # false: traffic cars keep their lane (still car-following); the ego's IDM (B0) is unaffected
 
   seeds:
     # MetaDrive seeds. Training draws from [train_low, train_high); evaluation uses the fixed list below.

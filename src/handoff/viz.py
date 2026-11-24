@@ -1,6 +1,14 @@
 """Seeing what the car does: the MetaDrive viewer with overlays (live, replay, validation) and the plots.
 
-Viewer overlays (keys: M = overlays on / off, X = end the episode, K = M3 corridor constraints on / off):
+Viewer keys:
+  Space / P  pause / resume          N  play 0.2 s, then pause        X  end the episode
+  M  all overlays + panel on / off   I  text panel on / off           D  move the panel (cycles the 4 corners)
+  1-7  one overlay layer on / off: 1 trail, 2 reference / lane plan, 3 MPC prediction, 4 corridor,
+       5 keep-out boxes, 6 gate line, 7 points (balls)
+  C  screenshot (MetaDrive: main_index_<seed>_step_<n>_<time>.png in the working folder)
+  B / Q  top-down / chase camera (MetaDrive); mouse wheel zooms.  K  M3 corridor constraints on / off (validate.py)
+  Avoid R, [ and ] (MetaDrive resets / changes the map behind this env's back).
+Viewer overlays:
   all  white line     ego trail (last 20 s)
   M2   yellow line    quintic reference          white ball  its end          magenta ball  PID tracking point
   M3   yellow line    lane plan (validation: waypoint spline)   cyan line   MPC predicted path
@@ -63,7 +71,8 @@ def lead_car(ego, objects):
 
 
 def overlay(env, diag: dict) -> tuple[list, list, dict]:
-    """(lines [(xy, colour)], points [((x, y), colour)], text panel) for the current control step."""
+    """(lines [(xy, colour, layer)], points [((x, y), colour, layer)], text panel) for the current control step.
+    ``layer`` is a key of ``LAYERS`` (each can be hidden in the viewer)."""
     ego, road, objs = env.ego, env.road, env.objects
     name, method, dec = env.cfg["method"]["name"], env.method, env.decision
     ref = method.reference
@@ -89,26 +98,27 @@ def overlay(env, diag: dict) -> tuple[list, list, dict]:
         if not method.mpc.constraints_on:
             text["corridor constraints"] = "OFF (K)"
         m = (ref.s >= ego.s - 5) & (ref.s <= ego.s + 150)
-        lines.append((np.stack([ref.x[m], ref.y[m]], axis=1), YELLOW))
+        lines.append((np.stack([ref.x[m], ref.y[m]], axis=1), YELLOW, "reference"))
         if diag.get("pred_xy") is not None:
-            lines.append((diag["pred_xy"], CYAN))
+            lines.append((diag["pred_xy"], CYAN, "mpc"))
         if method.tube is not None and method.mpc.constraints_on:
-            lines += [(seg, BLUE) for seg in corridor_lines(method.tube, road)]
+            lines += [(seg, BLUE, "corridor") for seg in corridor_lines(method.tube, road)]
         for o in objs:
             zl, zw = method.corridor.keepout_half(o)
-            lines.append((box_xy(road, o.s - zl, o.s + zl, o.d - zw, o.d + zw), MAGENTA))
+            lines.append((box_xy(road, o.s - zl, o.s + zl, o.d - zw, o.d + zw), MAGENTA, "keepout"))
         ahead = method.waypoints[method.waypoints[:, 0] > ego.s]
         if len(ahead):
-            lines.append((np.array([[ego.x, ego.y], road.to_world(*map(float, ahead[0]))]), RED if gated else ORANGE))
-        points += [(road.to_world(float(s), float(d)), WHITE) for s, d in dec["waypoints"]]
+            lines.append((np.array([[ego.x, ego.y], road.to_world(*map(float, ahead[0]))]), RED if gated else ORANGE,
+                          "gate"))
+        points += [(road.to_world(float(s), float(d)), WHITE, "points") for s, d in dec["waypoints"]]
     elif name == "m2" and dec:
         text["ref d / v"] = f"{diag.get('ref_d', 0):5.2f} m / {diag.get('ref_v', 0) * 3.6:5.1f} km/h"
         text["cross-track / heading err"] = (f"{diag.get('cross_track', 0):+5.2f} m / "
                                              f"{np.rad2deg(diag.get('heading_error', 0)):+5.1f} deg")
         text["speed err"] = f"{diag.get('speed_error', 0) * 3.6:+5.1f} km/h"
-        lines.append((np.stack([ref.x, ref.y], axis=1), YELLOW))
-        points.append(((ref.x[-1], ref.y[-1]), WHITE))
-        points.append((road.to_world(float(ego.s), float(ref.at_s(ego.s)["d"])), MAGENTA))
+        lines.append((np.stack([ref.x, ref.y], axis=1), YELLOW, "reference"))
+        points.append(((ref.x[-1], ref.y[-1]), WHITE, "points"))
+        points.append((road.to_world(float(ego.s), float(ref.at_s(ego.s)["d"])), MAGENTA, "points"))
     text["steering / throttle"] = f"{ego.steering:+5.2f} / {ego.throttle_brake:+5.2f}"
     lead = lead_car(ego, objs)
     if lead:
@@ -120,23 +130,41 @@ def overlay(env, diag: dict) -> tuple[list, list, dict]:
 
 
 # ======================================================================================= viewer
+# layer -> toggle key; the keys and the rest of the viewer's controls are listed in the module docstring
+LAYERS = {"trail": "1", "reference": "2", "mpc": "3", "corridor": "4", "keepout": "5", "gate": "6", "points": "7"}
+PANEL_CORNERS = ("top-left", "top-right", "bottom-right", "bottom-left")
+STEP_S = 0.2      # N: play this long, then pause again
+
+
 class Viewer:
-    """Draws the overlays into MetaDrive's 3D window after every control step (set as ``env.on_step``)."""
+    """Draws the overlays into MetaDrive's 3D window after every control step (set as ``env.on_step``), and owns the
+    viewer keys (module docstring)."""
 
     def __init__(self, fps: float = 10.0, extra_points=(), allow_constraint_toggle: bool = False,
-                 show_return: bool = False):
+                 show_return: bool = False, paused: bool = False, panel: bool = True):
         self.fps = fps                        # 10 = real time, 0 = as fast as it renders
         self.show_return = show_return        # text panel: return so far + each reward term's running total
         self.extra_points = list(extra_points)  # world (x, y) drawn white (validation: every placed waypoint)
         self.extra_text: dict = {}
         self.allow_toggle = allow_constraint_toggle
-        self.show, self.finish = True, False
+        self.show, self.finish = True, False  # M: everything (lines, points, panel)
+        self.layers = dict.fromkeys(LAYERS, True)
+        self.panel, self.panel_corner = panel, 0   # I: text panel on / off, D: its corner
+        self.paused, self.steps_left, self._step_request = paused, 0, False   # N: steps_left control steps to play
         self.trail: list = []
+        self._frame = None                    # (lines, points, text) of the last control step, redrawn on a key
+        self._dirty = False
         self._lines = self._points = None
         self._t_last = time.time()
 
     def new_episode(self) -> None:
         self.trail, self.finish = [], False
+
+    def _key(self, fn):
+        def handler():
+            fn()
+            self._dirty = True
+        return handler
 
     def _setup(self, env) -> None:
         eng = env.md.engine
@@ -144,8 +172,24 @@ class Viewer:
         self._lines.setShaderOff(1)   # line geometry has no normals: draw unlit or it is invisible
         self._lines.setLightOff(1)
         self._points = eng.make_point_drawer(scale=4.0)
-        eng.accept("x", lambda: setattr(self, "finish", True))
-        eng.accept("m", lambda: setattr(self, "show", not self.show))
+        msg = eng.on_screen_message
+        if msg is not None:           # MetaDrive redraws the panel on every physics step too: place it after each
+            draw = msg.render
+
+            def render(data=None):
+                draw(data)
+                self._place_panel(env)
+            msg.render = render
+        k = self._key
+        eng.accept("x", k(lambda: setattr(self, "finish", True)))
+        eng.accept("m", k(lambda: setattr(self, "show", not self.show)))
+        eng.accept("i", k(lambda: setattr(self, "panel", not self.panel)))
+        eng.accept("d", k(lambda: setattr(self, "panel_corner", (self.panel_corner + 1) % len(PANEL_CORNERS))))
+        for name, key in LAYERS.items():
+            eng.accept(key, k(lambda n=name: self.layers.__setitem__(n, not self.layers[n])))
+        for key in ("space", "p"):    # replaces MetaDrive's own P pause, which cannot step
+            eng.accept(key, k(lambda: setattr(self, "paused", not self.paused)))
+        eng.accept("n", k(lambda: setattr(self, "_step_request", True)))
         if self.allow_toggle and hasattr(env.method, "mpc"):
             def toggle():
                 mpc = env.method.mpc
@@ -157,24 +201,69 @@ class Viewer:
     def __call__(self, env, diag: dict) -> None:
         if self._lines is None:
             self._setup(env)
+        if self._step_request:        # N while running: this control step is the first of STEP_S
+            self._step_request, self.steps_left = False, max(int(round(STEP_S / env.dt)), 1)
         self.trail = (self.trail + [(env.ego.x, env.ego.y)])[-200:]
-        self._lines.reset()
-        self._points.reset()
-        if self.show:
-            lines, points, text = overlay(env, diag)
-            lines.insert(0, (np.array(self.trail), TRAIL))
-            points += [(p, WHITE) for p in self.extra_points]
-            self._draw(lines, points)
-            env.md.render(text={**self._return_text(env), **self.extra_text, **text,
-                                "keys": "M overlays, X end episode"
-                                + (", K constraints" if self.allow_toggle else "")})
-        else:
-            env.md.render()
+        lines, points, text = overlay(env, diag)
+        lines.insert(0, (np.array(self.trail), TRAIL, "trail"))
+        points += [(p, WHITE, "points") for p in self.extra_points]
+        self._frame = (lines, points, {**self._return_text(env), **self.extra_text, **text})
+        self._render(env)
+        if self.steps_left:
+            self.steps_left -= 1
+            if not self.steps_left:
+                self.paused = True
         if self.fps > 0:
             wait = 1.0 / self.fps - (time.time() - self._t_last)
             if wait > 0:
                 time.sleep(wait)
+        self._dirty |= self.paused             # show 'paused' on the panel
+        while self.paused and not self.finish:   # keep the window live (keys, camera) while paused
+            if self._dirty:
+                self._render(env)
+            env.md.engine.taskMgr.step()
+            time.sleep(1 / 60)
+            if self._step_request:    # N while paused: play the next STEP_S, then pause again
+                self._step_request, self.steps_left = False, max(int(round(STEP_S / env.dt)), 1)
+                self.paused = False
         self._t_last = time.time()
+
+    def _render(self, env) -> None:
+        self._dirty = False
+        self._lines.reset()
+        self._points.reset()
+        lines, points, text = self._frame
+        if self.show:
+            self._draw([(xy, c) for xy, c, layer in lines if self.layers[layer]],
+                       [(p, c) for p, c, layer in points if self.layers[layer]])
+        off = [f"{key} {n}" for n, key in LAYERS.items() if not self.layers[n]]
+        env.md.render(text={**text, "keys": "Space pause, N step 0.2 s, M all, I/D panel hide/move, 1-7 layers, "
+                            "C screenshot, X end" + (", K constraints" if self.allow_toggle else ""),
+                            "layers off": ", ".join(off) or "-",   # MetaDrive keeps old keys: always set both
+                            "paused": "YES (Space resume, N step)" if self.paused else "-"})
+
+    def _place_panel(self, env) -> None:
+        """MetaDrive rebuilds its text panel on every render: hide it, or move it to the chosen corner."""
+        from panda3d.core import TextNode
+
+        msg = env.md.engine.on_screen_message
+        t = getattr(msg, "onScreenText", None)
+        if not t or t.textNode is None:
+            return
+        if not (self.show and self.panel):
+            t.hide()
+            return
+        corner = PANEL_CORNERS[self.panel_corner]
+        eng = env.md.engine
+        parent = {"top-left": eng.a2dTopLeft, "top-right": eng.a2dTopRight,
+                  "bottom-right": eng.a2dBottomRight, "bottom-left": eng.a2dBottomLeft}[corner]
+        right, bottom = corner.endswith("right"), corner.startswith("bottom")
+        tn = t.textNode
+        tn.setAlign(TextNode.ARight if right else TextNode.ALeft)
+        height = tn.getNumRows() * tn.getLineHeight() * t.getTextScale()[1]
+        t.reparentTo(parent)
+        t.setTextPos(-0.05 if right else 0.05, height + 0.03 if bottom else -0.08)
+        t.show()
 
     def _return_text(self, env) -> dict:
         if not self.show_return:
@@ -217,7 +306,7 @@ def drive_episode(env, act: Callable, seed: int, tag: str, viewer: Viewer | None
 
 # ======================================================================================= live / replay
 def live(cfg: dict, checkpoint, seeds: list[int], out_dir: Path, render: bool = True, fps: float = 10.0,
-         deterministic: bool = True) -> list[dict]:
+         deterministic: bool = True, paused: bool = False, panel: bool = True) -> list[dict]:
     """Run a policy (checkpoint, or B0 with None) on ``seeds`` with the viewer; a report per episode."""
     from handoff.env import make_env
     from handoff.evaluate import load_policy_fn
@@ -225,7 +314,7 @@ def live(cfg: dict, checkpoint, seeds: list[int], out_dir: Path, render: bool = 
     policy = load_policy_fn(checkpoint, deterministic, cfg)      # checked before the window opens
     env = make_env(cfg, render=render, is_eval=True, run_dir=out_dir)
     act = policy or (lambda obs: np.zeros(env.action_space.shape, np.float32))
-    viewer = Viewer(fps=fps) if render else None
+    viewer = Viewer(fps=fps, paused=paused, panel=panel) if render else None
     summaries = []
     try:
         for seed in seeds:

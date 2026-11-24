@@ -39,6 +39,7 @@ python scripts/drive.py --seeds 1000 1003                                   # dr
 python scripts/plot.py reward runs/drive/<ts>/episodes/<id>.npz --reward r5 # re-score a drive / episode
 python scripts/compare.py runs/eval/b0 runs/m*/r5/seed_*/* --out results/  # method comparison table
 python scripts/robustness.py --b0 --runs runs/m*/r5/seed_*/*               # robustness sweep (configs/robustness.yaml)
+sbatch --export=ALL,POLICY=<run dir or b0> slurm/robustness.sbatch     # robustness v2 on Great Lakes (configs/robust_v2.yaml)
 
 python scripts/validate.py run configs/validation/overtake.json             # M3 on hand-placed waypoints + cars
 python scripts/validate.py edit --out configs/validation/my_test.json       # place waypoints / cars, then Run

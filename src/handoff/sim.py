@@ -45,7 +45,7 @@ def make_metadrive_config(cfg: dict, render: bool = False, agent_policy=None) ->
         log_level=sim.get("log_level", 50),
         physics_world_step_size=sim["physics_world_step_size"],
         decision_repeat=sim["decision_repeat"],
-        horizon=sim["horizon"],
+        horizon=sim.get("timeout_steps") or sim["horizon"],   # episode cap (robustness: a longer timeout)
         start_seed=0,
         store_map=bool(sim.get("store_map", False)),   # MetaDrive default True keeps every visited map (~10 MB each,
                                                        # up to num_scenarios per process): the memory growth that
@@ -286,6 +286,9 @@ def time_to_collision(ego: EgoState, obj: TrackedObject, road: RoadFrame) -> flo
 
 
 # ======================================================================================= traffic
+MIN_TRAFFIC_KMH = 1.0   # MetaDrive's IDM divides by the cruise speed: a 0 km/h lane (robustness: 5 - 5) runs at 1
+
+
 class TrafficSpeeds:
     """Traffic cruise speeds: ``scenario.traffic.speed_km_h`` + a per-lane offset (``lane_speed_offset_km_h``,
     indexed by MetaDrive lane, 0 = next to the centre line), re-read from each car's current lane every step."""
@@ -304,7 +307,7 @@ class TrafficSpeeds:
             lane = None
         if lane is not None and 0 <= lane < len(self.offsets):
             v += self.offsets[lane]
-        return v
+        return max(v, MIN_TRAFFIC_KMH)
 
     def on_reset(self, md) -> None:
         """Trigger-mode placement (random positions over every block but the first), but every car drives from

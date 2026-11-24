@@ -240,10 +240,14 @@ class DrivingEnv(gym.Env):
         self.recorder.start(self.episode_id, self.episode_seed, full,
                             meta={"method": self.cfg["experiment"]["method"],
                                   "reward_variant": self.cfg["experiment"]["reward_variant"],
-                                  "is_eval": int(self.is_eval), "rank": self.rank})
+                                  "is_eval": int(self.is_eval), "rank": self.rank,
+                                  "n_cars": len(self.md.engine.traffic_manager._traffic_vehicles)})
         self.total_episodes += 1
         self.episode_open = True
         self.decision = {}
+        self._ahead: dict = {}                  # car id -> ahead of the ego last step (overtake counting)
+        self._speeds = self._speeds_before = ({}, self.ego.v)   # ({car id: v}, ego v) now / one step earlier
+        self.cars_passed = self.passed_by = 0
         self.method.reset()
         return self._obs(), {"episode_seed": self.episode_seed, "episode_id": self.episode_id}
 
@@ -272,7 +276,48 @@ class DrivingEnv(gym.Env):
     def end_episode(self, reason: str) -> dict:
         """Close the episode's log (also for scripts that stop an episode early) -> episode summary."""
         self.episode_open = False
-        return self.recorder.finish(reason, self.counters())
+        return {**self.recorder.finish(reason, self.counters()), **self._episode_extras(reason)}
+
+    def _track_passes(self) -> None:
+        """Overtakes: a car seen ahead and now behind = passed; behind and now ahead = passed by (env.objects).
+        Also keeps the speeds one step back: at a collision the physics has already changed them."""
+        self._speeds_before, self._speeds = self._speeds, ({o.id: o.v for o in self.objects}, self.ego.v)
+        for o in self.objects:
+            ahead = o.s > self.ego.s
+            was = self._ahead.get(o.id)
+            if was is True and not ahead:
+                self.cars_passed += 1
+            elif was is False and ahead:
+                self.passed_by += 1
+            self._ahead[o.id] = ahead
+
+    def _episode_extras(self, reason: str) -> dict:
+        """Summary fields from the env's state at the end: overtakes, route, and what a collision was.
+
+        crash_type: rear_end (ego hit a car ahead), hit_from_behind, side (contact on the long sides: lane-change
+        swipe), off_road, other (collision with no tracked car nearby) or "" (no crash). Speeds in m/s, taken one
+        control step (0.1 s) before contact; closing speed = how fast the gap was shrinking."""
+        out = {"cars_passed": self.cars_passed, "passed_by": self.passed_by, "route_length": self.road.length,
+               "route_completion": min(max(self.ego.s / max(self.road.length, 1e-6), 0.0), 1.0),
+               "crash_type": "off_road" if reason == "off_road" else "", "crash_ego_speed": float("nan"),
+               "crash_other_speed": float("nan"), "crash_closing_speed": float("nan")}
+        if reason == "collision":
+            cars_before, ego_v = self._speeds_before
+            out["crash_type"], out["crash_ego_speed"] = "other", float(ego_v)
+            if self.objects:
+                o = min(self.objects, key=lambda c: box_gap(self.ego, c))
+                o_v = float(cars_before.get(o.id, o.v))
+                ds, dd = o.s - self.ego.s, o.d - self.ego.d
+                lon = abs(ds) - 0.5 * (o.length + self.ego.length)    # separation along / across the road; the
+                lat = abs(dd) - 0.5 * (o.width + self.ego.width)      # larger one is the face that touched
+                if lon >= lat:
+                    out["crash_type"] = "rear_end" if ds > 0 else "hit_from_behind"
+                    out["crash_closing_speed"] = (ego_v - o_v) if ds > 0 else (o_v - ego_v)
+                else:
+                    out["crash_type"] = "side"
+                    out["crash_closing_speed"] = abs(ego_v - o_v)
+                out["crash_other_speed"] = o_v
+        return out
 
     def close(self):
         self.md.close()
@@ -304,6 +349,7 @@ class DrivingEnv(gym.Env):
         self.total_control_steps += 1
         self.ego = extract_ego(self.md, self.road, self.episode_control_steps * self.dt)
         self._extract_objects()
+        self._track_passes()
         total, raw, weighted = self.reward.step(prev, self.ego, info, self.objects)
         self._log_step(u, diag, total, raw, weighted)
         info["reward_terms"] = raw
@@ -329,6 +375,7 @@ class DrivingEnv(gym.Env):
             "cmd_steering": u[0],
             "cmd_throttle": u[1],
             "decision_index": self.episode_decisions,
+            "lane": self.road.nearest_lane(self.ego.d),
         }
         status = str(diag.get("status", ""))
         if diag.get("fallback"):
@@ -356,7 +403,7 @@ class DrivingEnv(gym.Env):
         values = {"v": e.v / self.v_max, "d": (e.d - road.d_center) / road.half_width,
                   "lane_offset": (e.d - nearest) / road.lane_width, "psi_err": e.psi_err, "steering": e.steering,
                   "throttle_brake": e.throttle_brake, "target_lane": float(self.method.target_lane_offset()),
-                  "t_left": 1.0 - self.episode_control_steps / self.horizon_steps}
+                  "t_left": max(1.0 - self.episode_control_steps / self.horizon_steps, 0.0)}
         obs = {"ego": np.clip(np.asarray([values[f] for f in EGO_FEATURES], np.float32), -5.0, 5.0),
                "lanes": np.clip(lane_features(e, self.seen, road, self.obs_range, self.v_max), -5.0, 5.0)}
         if self.method.COMMAND_FEATURES:

@@ -1,0 +1,37 @@
+# Robustness suite v2 (scripts/robustness.py --config configs/robust_v2.yaml): frozen policies under traffic they were
+# not trained on. Ideal sensing and actuation (no noise, no delay); the ego car keeps its trained dynamics.
+#
+# Nominal (training) conditions: density 0.15, traffic 40 km/h with lane offsets +5 / 0 / -5 (45 / 40 / 35 km/h).
+# Every condition, nominal included, also gets:
+#   * `fixed`: a 300 s timeout (training: 150 s) so very slow traffic is not scored as a failure for lack of time,
+#     and 100 evaluation seeds (1000-1099; training never sees seeds >= 1000);
+#   * spawn_at_traffic_speed: the ego starts at the average road speed (traffic speed + mean lane offset), so it
+#     does not spawn at 40 km/h into 5 km/h traffic.
+# A condition shared by several sweeps / the grid (e.g. density 0.1 at 40 km/h) is evaluated once.
+# Size: 54 conditions x 5 policies = 270 evaluations x 100 episodes.
+
+nominal:
+  scenario.traffic.density: 0.15
+  scenario.traffic.speed_km_h: 40
+  scenario.traffic.lane_speed_offset_km_h: [5, 0, -5]
+
+fixed:
+  sim.timeout_steps: 3000
+eval_seeds: [1000, 1100]          # range: 1000 ... 1099
+spawn_at_traffic_speed: true
+
+sweeps:
+  density:                        # cars per 10 m of lane, roughly; 0.3 max so MetaDrive can still place them all
+    key: scenario.traffic.density   # (cars placed per episode: the "cars on route" rows of the report)
+    values: [0.0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3]
+  traffic_speed:                  # base speed; at 5 km/h the right lane (-5) is parked cars
+    key: scenario.traffic.speed_km_h
+    values: [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70]
+  lane_spread:                    # per-lane offsets (left / middle / right): is there a fast lane worth taking?
+    key: scenario.traffic.lane_speed_offset_km_h
+    values: [[0, 0, 0], [5, 0, -5], [10, 0, -10], [15, 0, -15], [20, 0, -20]]
+
+grids:                            # every combination: one heatmap per method and metric
+  density_x_speed:
+    keys: [scenario.traffic.density, scenario.traffic.speed_km_h]
+    values: [[0.05, 0.1, 0.15, 0.2, 0.25, 0.3], [10, 20, 30, 40, 50, 60, 70]]

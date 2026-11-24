@@ -16,6 +16,8 @@ sim:
                             # (~10 MB each, 1040 seeds): memory grew ~10 MB per episode until OOM. false = rebuild
   horizon: 1500             # control steps before timeout (truncated); 150 s (longest route 1144 m = 103 s at the
                             # 40 km/h traffic speed; 120 s left too little margin)
+  timeout_steps: null       # episode cap if set (robustness: 3000 = 300 s for slow traffic); the ego feature t_left
+                            # still counts down over `horizon` (then holds at 0), so policies see what they trained on
   on_continuous_line_done: true
   log_level: 50             # MetaDrive logging (50 = CRITICAL only)
   render_clean: false       # viewer only: hide MetaDrive's navigation marks, dashboard and FPS counter

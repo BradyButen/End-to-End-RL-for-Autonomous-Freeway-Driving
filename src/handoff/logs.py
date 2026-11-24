@@ -28,7 +28,8 @@ from handoff.sim import EGO_FIELDS, OBJECT_FIELDS, EgoState, pack_objects
 # new episodes.csv compare. New runs count those plans in infeasible_count instead (they no longer end the episode).
 TERMINATIONS = ("success", "collision", "emergency_brake", "infeasible_plan", "off_road", "timeout", "other")
 STEP_SCALARS = ("reward", "tracking_error", "solve_time", "cpu_time", "fallback", "gated_brake", "min_gap",
-                "min_ttc", "ref_d", "ref_v", "ref_psi", "cmd_steering", "cmd_throttle", "decision_index")
+                "min_ttc", "ref_d", "ref_v", "ref_psi", "cmd_steering", "cmd_throttle", "decision_index",
+                "lane")   # lane: the ego's nearest lane, 0 = leftmost (next to the centre line)
 
 
 def termination_reason(info: dict, truncated: bool) -> str:
@@ -65,7 +66,8 @@ class EpisodeRecorder:
         self.status: list[str] = []
         self.objects, self.object_ids, self.pred_paths = [], [], []
         self.tube_steps, self.tubes, self.tube_trajs = [], [], []
-        self.dec: dict[str, list] = {"k": [], "control_steps": [], "reward": [], "start_step": [], "infeasible": []}
+        self.dec: dict[str, list] = {"k": [], "control_steps": [], "reward": [], "start_step": [], "infeasible": [],
+                                     "v_target": [], "speed_cmd": []}
         self.dec_full: dict[str, list] = {"raw_action": [], "decoded": [], "waypoints": []}
         self.references: list[np.ndarray] = []
 
@@ -97,6 +99,8 @@ class EpisodeRecorder:
         self.dec["reward"].append(reward)
         self.dec["start_step"].append(start_step)
         self.dec["infeasible"].append(int(not decision.get("feasible", True)))   # M3: plan over max_lat_accel
+        self.dec["v_target"].append(float(decision.get("v_target", np.nan)))     # M2 / M3: the RL's target speed
+        self.dec["speed_cmd"].append(int(decision.get("speed_cmd", -1)))         # M2 / M3: 0 hold, 1 +10, 2 -10
         if self.full:
             self.dec_full["raw_action"].append(np.asarray(raw_action, np.float32).ravel())
             self.dec_full["decoded"].append(np.asarray(decision.get("vector", []), np.float32).ravel())
@@ -221,6 +225,28 @@ def episode_metrics(steps: dict, decisions: dict, reason: str, dt: float, max_st
     for k in range(1, 6):
         out[f"k{k}_count"] = int(np.sum(ks == k))
     out["infeasible_count"] = int(np.sum(np.asarray(decisions.get("infeasible", []), int)))   # M3 decisions
+
+    # speed profile (m/s, like mean_speed) and time shares: crawling / stop-and-go that the mean hides
+    out["min_speed"] = _stat(np.min, v)
+    out["max_speed"] = _stat(np.max, v)
+    out["p10_speed"] = float(np.percentile(v, 10)) if len(v) else float("nan")
+    out["frac_time_below_10kmh"] = float(np.mean(v < 10 / 3.6)) if len(v) else float("nan")
+    out["frac_time_above_70kmh"] = float(np.mean(v > 70 / 3.6)) if len(v) else float("nan")
+    ttc = np.asarray(steps["min_ttc"], float)
+    out["frac_time_ttc_below_3s"] = float(np.mean(ttc < 3.0)) if len(ttc) else float("nan")   # risk exposure
+    lane = np.asarray(steps["lane"], float)
+    for i in range(3):                                  # freeway: 3 lanes, 0 = leftmost (fastest offset)
+        out[f"frac_time_lane{i}"] = float(np.mean(lane == i)) if len(lane) else float("nan")
+
+    # M2 / M3 speed commands (NaN / 0 for M1 and B0)
+    vt = np.asarray(decisions.get("v_target", []), float)
+    sc = np.asarray(decisions.get("speed_cmd", []), int)
+    out["n_speed_up"] = int(np.sum(sc == 1))
+    out["n_speed_down"] = int(np.sum(sc == 2))
+    has_vt = len(vt) and np.isfinite(vt).any()
+    out["mean_target_speed"] = float(np.nanmean(vt)) if has_vt else float("nan")
+    out["max_target_speed"] = float(np.nanmax(vt)) if has_vt else float("nan")
+    out["final_target_speed"] = float(vt[np.isfinite(vt)][-1]) if has_vt else float("nan")
     return out
 
 

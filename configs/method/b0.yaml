@@ -1,8 +1,0 @@
-# B0: MetaDrive's stock IDMPolicy drives the ego (car following + lane changes, 30 km/h). Evaluation only.
-# Stock IDM lane changes are on (traffic and ego).
-experiment:
-  method: b0
-
-method:
-  name: b0
-  decision_period: 1

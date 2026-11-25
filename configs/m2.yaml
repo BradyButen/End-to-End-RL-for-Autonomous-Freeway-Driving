@@ -1,0 +1,36 @@
+# M2: the RL picks [lane command, speed command] every 0.5 s; a quintic to the target lane plus an
+# acceleration-limited speed profile is tracked by cascaded PIDs. No safety layer: braking for cars is the RL's job
+# (src/handoff/m2.py).
+experiment:
+  method: m2
+
+method:
+  name: m2
+  decision_period: 5           # control steps per RL decision (0.5 s)
+  trajectory:
+    horizon: 2.0               # s for the quintic lane change. Shorter is snappier but a one-lane change then nears
+                               # MetaDrive's grip (~9 m/s^2 at 1.5 s, and the PID overshot off the road); 2 s peaks
+                               # at ~5 m/s^2
+    dt: 0.1
+    accel_limit: 2.0           # speed-profile acceleration limit (m/s^2)
+    decel_limit: 4.0           # speed-profile deceleration limit (m/s^2)
+  pid:                         # [kp, ki, kd], tuned on the kinematic bicycle with a 0.12 s steering lag
+    heading: [1.0, 0.005, 0.0]
+    lateral: [0.06, 0.0005, 0.0]
+    speed: [0.25, 0.0008, 0.0] # on (v_ref - v) in m/s -> throttle_brake
+    integral_limit: 5.0
+    speed_feedforward: true    # add the throttle_brake that produces a_ref (from the actuation table)
+
+training:                      # 7.5 h job: the wall clock is the stop; the budget is set above what it can reach
+  total_control_steps: 20000000
+  max_wall_minutes: 450
+  init_default_prob: [0.95, 0.8]   # initial [keep lane, hold speed] probabilities: at first a lane change is tried
+                               # about every 10 s, and the target speed moves on 20 % of decisions
+
+ppo:
+  n_steps: 256                 # decisions per env per rollout = 128 s of driving, same as M1 and M3
+  batch_size: 256
+  n_epochs: 4                  # update guard: few epochs, early stop at target_kl and a lower learning rate. With
+  target_kl: 0.03              # larger updates M2's policy drifted (approx_kl 0.55) and collapsed from 100 % to 0 %
+  learning_rate: 0.0001        # success
+  ent_coef: 0.01               # discrete actions: a small entropy bonus keeps lane changes in play

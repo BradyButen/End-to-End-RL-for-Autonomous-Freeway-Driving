@@ -1,0 +1,24 @@
+# M1: end-to-end. The RL outputs [target lateral acceleration, target acceleration] every control step
+# (src/handoff/m1.py).
+experiment:
+  method: m1
+
+method:
+  name: m1
+  decision_period: 1           # control steps per RL decision
+  accel_range: [-4.0, 2.9]     # m/s^2 for action -1 / +1 (0 = hold speed), through the actuation table. +2.9 is full
+                               # throttle; -4 rather than full brake (-15.8) keeps zero-mean noise near zero net
+                               # acceleration
+  steer_lat_accel: 8.0         # m/s^2 for lateral action +-1 (about MetaDrive's grip, ~8.8 m/s^2)
+
+training:                      # 7.5 h job: the wall clock is the stop; the budget is set above what it can reach
+  total_control_steps: 25000000
+  max_wall_minutes: 450
+  init_log_std: [-1.9, -0.7]   # initial std [lateral 0.15 = 1.2 m/s^2, accel 0.5 = ~1.5 m/s^2], so braking gets
+                               # sampled even from the warm start (the clone sits at accel +0.8)
+
+ppo:                           # small, stable updates (see the comment in m2.yaml)
+  n_steps: 1280                # decisions per env per rollout = 128 s of driving, same as M2 and M3
+  n_epochs: 4
+  batch_size: 512
+  target_kl: 0.03

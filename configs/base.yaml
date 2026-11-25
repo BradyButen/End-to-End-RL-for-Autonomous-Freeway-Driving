@@ -1,10 +1,10 @@
-# Base configuration. Merge order (spec §14):
-#   base.yaml -> scenario/<s>.yaml -> method/<m>.yaml -> reward/<r>.yaml -> CLI overrides (key.sub=value)
+# Base configuration. Merge order (src/handoff/config.py):
+#   base.yaml -> <scenario>.yaml (freeway) -> <method>.yaml (m1 m2 m3 b0) -> <reward>.yaml (r5) -> --set key.sub=value
 
 experiment:
-  method: m1               # set by method/<m>.yaml
-  reward_variant: r3_fast  # set by reward/<r>.yaml (r3_fast is the only reward)
-  scenario: freeway        # set by scenario/<s>.yaml
+  method: m1               # set by <method>.yaml
+  reward_variant: r5       # set by <reward>.yaml
+  scenario: freeway        # set by <scenario>.yaml
   seed: 0                  # training seed (PPO init + training-episode seed stream)
   runs_root: runs
 
@@ -12,14 +12,16 @@ sim:
   physics_world_step_size: 0.02
   decision_repeat: 5        # control step = 0.1 s
   control_dt: 0.1
-  horizon: 1500             # control steps before timeout (truncated); 150 s (longest route 1144 m = 103 s at the
-                            # 40 km/h traffic speed; 120 s left too little margin)
+  store_map: false          # MetaDrive's map cache (default true) keeps every visited map, ~10 MB each, until
+                            # memory runs out; false rebuilds the seed's map on reset
+  horizon: 1500             # control steps before timeout = 150 s (the longest route takes 103 s at 40 km/h)
   on_continuous_line_done: true
   log_level: 50             # MetaDrive logging (50 = CRITICAL only)
+  render_clean: false       # viewer only: hide MetaDrive's navigation marks, dashboard and FPS counter
   metadrive_overrides:
     # Destroy objects on reset instead of reusing MetaDrive's object buffer: makes physics bit-exact across
     # episodes in one process (reused objects carry ~1e-5 m state noise that closed loops amplify), which
-    # deterministic replay relies on. DECISIONS D-11.
+    # deterministic replay (scripts/view.py replay) relies on.
     force_destroy: true
   map:
     # MetaDrive PG block string: "S" = straight block, length drawn from the seed in [40, 80] m. 16 blocks
@@ -30,38 +32,38 @@ sim:
     lane_width: 3.5
   ego:
     # Ego vehicle: MetaDrive "static_default" = the default car body with FIXED dynamics (engine 800, brake 150,
-    # friction 0.9, steering 40 deg). The stock "default" model resamples engine 750-850 / brake 80-180 every
-    # episode (pilot round 1 trained on that); the M2/M3 controllers were tuned on static_default.
-    # Spawn: first block, random lane, fixed speed.
+    # friction 0.9, steering 40 deg); the stock "default" model resamples engine and brake every episode. The M2 / M3
+    # controllers are tuned on static_default.
+    # Spawn: first block, fixed speed, random lane every episode.
     vehicle_model: static_default
-    spawn_speed_km_h: 40
-    random_spawn_lane: true
+    spawn_speed_km_h: 40      # traffic speed. Spawning at 80 km/h ran untrained policies into traffic within seconds
     max_steering_deg: 40      # default vehicle's max steering (used to convert steering commands to radians)
     max_speed_km_h: 80
     front_wheelbase: 1.05234
     rear_wheelbase: 1.4166
     length: 4.515
     width: 1.852
-  perception_range: 50.0    # R, metres; ObjectList radius
+  perception_range: 50.0    # R, metres: the cars the controllers / reward / logs see (env.objects)
   target_speed_km_h: 70     # global target speed
   v_cap_km_h: 80            # speed cap (M2 action range, M3 MPC constraint)
 
-observation:
-  bev:
-    resolution: 84
-    # MetaDrive "distance" is the SIDE LENGTH of the ego-centred square window, so 100 m => +/-50 m = R.
-    distance: 100.0
-    frame_stack: 3
-    post_stack: 5
-    frame_skip: 5
-  ego_features: [v, d, psi_err, steering, throttle_brake]
+observation:                # ground truth, the same for every method (src/handoff/env.py: EGO_FEATURES, LANE_SLOT)
+  range: 100.0              # m: cars the policy sees (nearest ahead / behind in its lane and the lanes either side);
+                            # 9 s of warning when closing at 40 km/h
 
-# Actuation mapping a [m/s^2] -> throttle_brake (used by M3's MPC; spec §19 "no sys-ID").
-# Static lookup table measured once with scripts/calibrate_actuation.py (open-loop full/partial
-# throttle and brake on the bare map). Pairs are (throttle_brake, longitudinal accel m/s^2), sorted.
+lane_action:                # M2 / M3 action: [lane command, speed command] (src/handoff/reference.py LaneTarget,
+                            # SpeedTarget): [keep / left / right, hold / faster / slower]; [0, 0] = keep both
+  settle: 0.5               # m: a lane change is "in progress" (new commands ignored) until the ego is this close
+                            # to the target lane's centre
+  speed_step_km_h: 10       # faster / slower change the target speed by this; it starts at the spawn speed and
+                            # persists. M2: the speed the PID tracks. M3: the MPC's ceiling (it brakes below it for cars)
+
+# Actuation table: acceleration a [m/s^2] <-> MetaDrive throttle_brake (M1's acceleration action, M2's speed
+# feed-forward, M3's MPC). Measured once, open loop on an empty road, holding each level from 15 m/s.
+# Pairs are (throttle_brake, longitudinal acceleration), sorted.
 actuation:
-  # Measured at 15 m/s, 2026-11-16. Positive throttle is linear (a = 2.909 u, no drag); u = 0 exactly coasts at
-  # -0.36 m/s^2 (parking brake 2.0 applied), so a tiny positive point is included to map a = 0 -> u ~ 0.0125.
+  # Positive throttle is linear (a = 2.909 u). u = 0 coasts at -0.36 m/s^2, so a small positive point maps
+  # a = 0 to u ~ 0.0125.
   table:
     - [-1.0, -15.805]
     - [-0.6, -11.703]
@@ -74,41 +76,57 @@ actuation:
 
 logging:
   full_log_eval: true
-  train_full_log_every: 50     # every Nth training episode per env gets full control/decision logs
-  tube_every: 10               # M3: store the corridor in full logs every Nth control step (it is rebuilt every step)
-  max_logged_objects: 10
+  train_full_log_every: 50     # every Nth training episode per env also gets a full log (.npz)
 
 eval:
   n_episodes: 40               # first N of scenario.seeds.eval (40 -> 2.5 % resolution on rates)
   n_workers: 1                 # parallel evaluation subprocesses (one MetaDrive each); raise on clusters
-  freq_control_steps: 200000   # evaluate every N control steps (summed over envs)
+  freq_control_steps: 500000   # evaluate every N control steps (summed over envs)
   deterministic: true
 
 training:
   total_control_steps: 2000000
-  max_wall_minutes: null       # optional wall-clock stop (training loop; the final eval still runs after it)
-  progress_seconds: 60         # print a one-line status (time, steps/s, episodes, recent return/success/crash)
+  max_wall_minutes: null       # safety stop for the training loop (step-0 / periodic evals included); the final eval
+                               # and final.zip still run after it, so leave ~30 min (M3: ~45) before the Slurm limit
+  progress_seconds: 20         # print a one-line status every this many seconds (time, steps/s, episodes, and over
+                               # the last 50 episodes: return, success, crash, km/h, distance, episode length)
   n_envs: 4
-  checkpoint_freq_control_steps: 100000
+  checkpoint_freq_control_steps: 500000
   device: auto                 # "auto" = cuda if available else cpu; or "cpu" / "cuda" / "cuda:0"
   torch_threads: null          # CPU threads for PPO updates in the main process (null = torch default)
-  gamma_ref: 0.99              # per-0.1 s discount; gamma_method = gamma_ref ** (T_decision / 0.1)  (~10 s lookahead)
+  gamma_ref: 0.999             # per-0.1 s discount; gamma_method = gamma_ref ** (T_decision / 0.1): M1 0.999, M2 0.995,
+                               # M3 0.990: a ~100 s lookahead, most of an episode, so the finish bonus counts from the
+                               # start. With ~10 s, crawling looked cheaper than any crash risk. The ego feature
+                               # t_left tells the critic how much time is left
   gae_lambda_ref: 0.995        # per-0.1 s GAE lambda; lambda_method = gae_lambda_ref ** (T_decision / 0.1)
-                               # -> M1 0.995, M2 0.975, M3 0.951 (same ~7 s credit window for all); replaces ppo.gae_lambda
+                               # -> M1 0.995, M2 0.975, M3 0.951 (the same ~7 s credit window for all)
   normalize_reward: true       # SB3 VecNormalize on rewards only (running return std); logs/eval stay raw
-  reward_clip: 100.0           # clip of the normalised reward (10 would clip the -500 crash penalty early in training)
-  watchdog_minutes: 30         # kill the job (exit 3) if no PPO step / eval completes for this long (hung worker);
-                               # must exceed one evaluation round. 0 disables. A crashed worker exits immediately.
+  reward_clip: 100.0           # clip of the normalised reward (10 could clip the crash penalty early in training)
+  watchdog_minutes: 15         # kill the job (exit 3) if nothing progresses for this long (hung worker): env start-up,
+                               # env steps, each eval episode and shutdown count. Must exceed one M3 eval episode
+                               # and one PPO update. 0 disables
+  # Warm start (docs/GUIDE.md). All off by default: a normal run starts PPO from random weights.
+  init_policy: null            # SB3 .zip, relative to the repo root (M1: data/bc/m1_clone.zip). Only its actor
+                               # (policy MLP, action head) is loaded; the critic and log_std start fresh. Must match
+                               # the method's observation and action spaces
+  # Initial exploration (train.init_exploration), set per method in configs/m*.yaml:
+  init_log_std: null           # M1 (continuous): initial log std, one number or one per action dimension
+                               # (null = ppo.policy_kwargs.log_std_init)
+  init_default_prob: null      # M2 / M3 (discrete): initial probability of index 0 (keep lane / hold speed), one
+                               # number or one per action component (null = uniform)
+  critic_warmup_control_steps: 0   # with init_policy: train ONLY the value net (actor frozen) for this many
+                               # control steps first, so the first PPO updates use a sensible advantage estimate
+                               # instead of a random critic's and do not wreck the loaded actor. 0 = off.
 
-ppo:                           # SB3 PPO kwargs (defaults unless overridden in method/*.yaml)
+ppo:                           # SB3 PPO kwargs (overridden per method in configs/m*.yaml)
   learning_rate: 0.0003
-  n_steps: 2048                # overridden per method (configs/method/*.yaml): 128 s of driving per env per rollout
+  n_steps: 2048                # set per method: 128 s of driving per env per rollout
   batch_size: 64
   n_epochs: 10
   clip_range: 0.2
-  ent_coef: 0.0                # no entropy bonus: exploration is set by log_std_init; a bonus would fight it
+  ent_coef: 0.0                # M1: no entropy bonus (exploration = init_log_std). M2 / M3 (discrete) set their own
   vf_coef: 0.5
   max_grad_norm: 0.5
   policy_kwargs:
-    normalize_images: false
-    log_std_init: -0.7         # initial action std 0.5 (SB3 default 0 -> std 1: ~32 % of samples clipped to ±1)
+    net_arch: [256, 256]       # separate policy and value MLPs on the ~40 observation numbers
+    log_std_init: -0.7         # continuous actions (M1): initial std 0.5; per dimension via training.init_log_std

@@ -1,5 +1,4 @@
-# Git tracks only essentials: code, configs, docs, and small result summaries.
-# Large binaries (checkpoints, per-episode logs) stay on disk / Great Lakes or go on a GitHub release.
+# Git tracks code, configs, docs, the human drives, the M1 clone and the final models. Training outputs stay local.
 
 # Python / build
 .venv/
@@ -8,10 +7,7 @@ __pycache__/
 *.egg-info/
 build/
 dist/
-.pytest_cache/
 .ruff_cache/
-.mypy_cache/
-.ipynb_checkpoints/
 
 # Editors / OS
 .vscode/
@@ -22,29 +18,24 @@ Thumbs.db
 
 # Local secrets and per-user tool settings
 .env
-.claude/settings.local.json
+.claude/
 
-# MATLAB autosaves and workspaces
-*.asv
-*.mat
-slprj/
-
-# Working outputs: training runs, tracking tests, job logs
+# Outputs: training runs, viewer reports, drives, Slurm logs
 runs/
 slurm-*.out
 *.log
+/*.png
+*.pdf
 
-# Large binaries, everywhere (including result snapshots): checkpoints and per-episode logs
+# Large binaries, except the curated ones below
 *.zip
 *.npz
 *.pt
 *.pth
 *.ckpt
-
-# Result snapshots (<MM_DD>_data/): commit configs, summaries (csv/txt/md), plots and job logs only.
-!/[0-9][0-9]_[0-9][0-9]_data/**/*.out
-
-# Figures go in a snapshot's plots/ folder, not the repo root
-/*.png
-
-Nav565-Team16-ProjectProposal.pdf
+# human drives (scripts/warm_start/drive.py): the behaviour-cloning data
+!data/human_demos/*.npz
+# the M1 clone (scripts/warm_start/bc.py): the PPO warm start
+!data/bc/*.zip
+# the final trained policies
+!models/*/checkpoints/best.zip

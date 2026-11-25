@@ -1,26 +1,29 @@
 #!/bin/bash
-# One training run: (method, reward variant, scenario, seed). Submit from the repo root:
+# One training run: (method, reward variant, scenario, seed). Submit from the repo root, with your Slurm account in
+# SBATCH_ACCOUNT (or add --account=<account> to sbatch):
 #
-#   sbatch --export=ALL,METHOD=m3,REWARD=r3_fast,SCENARIO=freeway,SEED=0 slurm/train.sbatch
+#   export SBATCH_ACCOUNT=<account>
+#   sbatch --export=ALL,METHOD=m3,REWARD=r5,SCENARIO=freeway,SEED=0 slurm/train.sbatch
 #   sbatch --export=ALL,METHOD=m1,EXTRA="--set training.total_control_steps=500000" slurm/train.sbatch
 #
 # GPU node by default (PPO updates on the GPU; simulation + MPC on the CPU cores). For a CPU-only run, change
 # --partition to standard, drop --gres, and add EXTRA="--set training.device=cpu --set training.torch_threads=4".
 #
 #SBATCH --job-name=handoff-train
-#SBATCH --account=rob535_navarch565_f26_class
 #SBATCH --partition=gpu                 # gpu (V100) or spgpu (A40); standard for CPU-only
 #SBATCH --gres=gpu:1
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=20              # training envs + eval workers + main process
 #SBATCH --mem-per-cpu=4g
-#SBATCH --time=04:00:00                 # estimate ~0.5–1 h per run at 2M control steps; 4 h margin
+#SBATCH --time=08:00:00                 # cluster cap; training.max_wall_minutes stops the loop in time for the
+                                        # final eval (450 min M1/M2, 420 M3). docs/GUIDE.md
 #SBATCH --output=slurm-%x-%j.out
+#SBATCH --mail-type=END,FAIL             # email the submitter when the job ends or fails
 
 set -euo pipefail
 METHOD="${METHOD:?set METHOD=m1|m2|m3}"
-REWARD="${REWARD:-r3_fast}"
+REWARD="${REWARD:-r5}"
 SCENARIO="${SCENARIO:-freeway}"
 SEED="${SEED:-0}"
 EXTRA="${EXTRA:-}"
@@ -32,7 +35,7 @@ source "${VENV:-$REPO_DIR/.venv}/bin/activate"
 
 export PYTHONUNBUFFERED=1                # live stdout in the slurm log
 export PYTHONFAULTHANDLER=1               # Python traceback on a native crash (segfault) in any process
-export SDL_VIDEODRIVER=dummy              # headless pygame (BEV observation)
+export SDL_VIDEODRIVER=dummy              # headless pygame
 export OMP_NUM_THREADS=1                  # env subprocesses: 1 thread each (PPO threads set below)
 export MKL_NUM_THREADS=1
 unset PYTHONPATH

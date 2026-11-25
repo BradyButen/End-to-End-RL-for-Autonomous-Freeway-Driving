@@ -1,0 +1,71 @@
+# M3: the RL picks [lane command, max-speed command] every 1 s; lane plan -> road corridor -> MPC, which drives up
+# to the max speed and brakes for cars (src/handoff/m3.py, src/handoff/mpc.py).
+experiment:
+  method: m3
+
+method:
+  name: m3
+  decision_period: 10          # control steps per RL decision (1.0 s)
+  lane_plan:                   # reference.LanePlan, built when the target lane changes
+    duration: 2.5              # s of travel per lane change (~56 m at 80 km/h; one lane peaks ~3.2 m/s^2)
+    max_lat_accel: 5.0         # m/s^2: a plan is lengthened until its peak is within this
+    min_length: 15.0           # m, shortest plan (slow speeds)
+    ahead: 150.0               # m of reference past the plan's end (covers the 5 s MPC horizon at 80 km/h)
+  spline:                      # reference sampling
+    ds: 1.0                    # path sample spacing (m)
+  corridor:                    # road-aligned boxes on the ego centre, one per MPC stage, rebuilt every control step
+    inset: -0.3                # lateral faces = outer lane centres pulled in by this (negative = wider): d in [-7.3, 0.3]
+    keepout_s: 1.0             # car keep-out zone: car + keepout_s fore / aft (m)
+    margin_d: 0.3              # ... + margin_d sideways (m)
+    rear_range: 2.0            # cars behind the ego are ignored unless their front bumper is within this of the
+                               # ego's rear bumper (m); cars ahead / alongside always count
+    accel: 2.0                 # stage-point speed ramp toward v* (m/s^2)
+    brake: 4.0                 # ... and down to v* (m/s^2)
+  mpc:
+    horizon: 50                # N stages (5.0 s at dt 0.1)
+    dt: 0.1
+    steer_lag: 0.1             # s, first-order wheel-angle lag in the model (measured)
+    weights:
+      lateral: 2.0
+      heading: 2.0
+      speed: 0.5
+      steer: 1.0
+      accel: 0.05
+      steer_rate: 20.0
+      accel_rate: 0.5
+      terminal_factor: 3.0
+      yaw_rate: 20.0           # ((psi_k - psi_k-1) / dt)^2, damps heading oscillation
+    barrier:                   # cost near the corridor's lateral faces (mpc.py, MPC._barrier)
+      weight: 1.0
+      dist: 0.5                # m from the face where the outer log barrier starts
+      inner_weight: 10.0
+      inner_dist: 0.25         # m from the face where the inner 1/gap^2 barrier starts
+    accel_bounds: [-8.0, 2.5]  # m/s^2 (-8 is about where MetaDrive braking stops being linear)
+    max_lat_accel: 9.3         # m/s^2, |v^2 tan(delta) / L| bound: the peak of the human drives. Close to MetaDrive's
+                               # grip (~8.8 m/s^2); the kinematic model cannot see skidding, so tracking degrades there
+    steer_rate_limit: 0.6      # rad/s
+    ceiling_brake: 4.0         # m/s^2; the v* speed ceiling ramps down from the current speed at this rate
+    hold_steer: [1.0, 0.3, 0.06]   # hold-lane fallback steering gains: heading, heading-rate damping, lane pull
+    soft_corridor:             # corridor half-spaces A p <= b + sigma, sigma >= 0, cost l1 sum(sigma) + l2 sum(sigma^2)
+      l1: 1000.0               # per m of violation per stage; larger than the constraint multipliers, so the corridor
+      l2: 1000.0               # holds exactly whenever it can. The largest slack is reported as corridor_violation
+    replay_steps:              # failed solve: replay the previous plan for this many steps (1 s), then hold speed
+      timeout: 10              # and lane until a solve succeeds. Kept short: a stale plan replayed for long drives
+      infeasible: 10           # off the road
+    solver:
+      max_iter: 100
+      max_cpu_time: 0.1        # IPOPT limit in process CPU time (s); exceeding it is a timeout
+      tol: 0.001
+      print_level: 0
+
+training:                      # 7 h of training (M3's final eval takes longer); the wall clock is the stop
+  total_control_steps: 10000000
+  max_wall_minutes: 420
+  init_default_prob: [0.9, 0.8]   # initial [keep lane, hold speed] probabilities (see m2.yaml)
+
+ppo:
+  n_steps: 128                 # decisions per env per rollout = 128 s of driving, same as M1 and M2
+  batch_size: 256
+  n_epochs: 4                  # same update guard as M1 / M2
+  target_kl: 0.03
+  ent_coef: 0.01               # discrete actions: a small entropy bonus keeps lane changes in play

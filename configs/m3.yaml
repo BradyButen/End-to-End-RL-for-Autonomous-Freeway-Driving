@@ -1,5 +1,5 @@
-# M3: RL picks [lane command, speed command on the max speed] every 1 s; lane plan -> road corridor -> MPC, which drives up to the max speed
-# and brakes for cars; the emergency-brake gate is off (src/handoff/m3.py, src/handoff/mpc.py).
+# M3: the RL picks [lane command, max-speed command] every 1 s; lane plan -> road corridor -> MPC, which drives up
+# to the max speed and brakes for cars (src/handoff/m3.py, src/handoff/mpc.py).
 experiment:
   method: m3
 
@@ -11,21 +11,11 @@ method:
     max_lat_accel: 5.0         # m/s^2: a plan is lengthened until its peak is within this
     min_length: 15.0           # m, shortest plan (slow speeds)
     ahead: 150.0               # m of reference past the plan's end (covers the 5 s MPC horizon at 80 km/h)
-  spline:                      # reference sampling (ds); extend: validation waypoint splines (plan_waypoints) only
+  spline:                      # reference sampling
     ds: 1.0                    # path sample spacing (m)
-    extend: 80.0               # path continues flat beyond the last waypoint (m)
-  ebrake:
-    gate: false                # true: emergency-brake (full brake, no MPC solve, ends the episode) when a car in the
-                               # planned path (line ego -> next plan point crosses its keep-out zone) is closed on faster
-                               # than gate_decel allows. Off: braking for cars is the MPC's job (corridor front face,
-                               # accel down to -8 m/s^2); the gate pre-empted it at 6 m/s^2 and ended runs it could save
-    gate_decel: 6.0            # m/s^2; fires when dv^2 / (2 gap) exceeds this
-    ends_episode: true         # the gate (if on) ends the episode as "emergency_brake" with the collision penalty;
-                               # false (validate.py run): the car brakes and the run goes on. MPC solve failures
-                               # never end it (mpc.py)
   corridor:                    # road-aligned boxes on the ego centre, one per MPC stage, rebuilt every control step
-    inset: -0.3                # lateral faces = exterior lane centres pulled in by this (negative = wider): [-7.3, 0.3]
-    keepout_s: 1.0             # car keep-out zone: car + keepout_s fore / aft (m); also used by the gate
+    inset: -0.3                # lateral faces = outer lane centres pulled in by this (negative = wider): d in [-7.3, 0.3]
+    keepout_s: 1.0             # car keep-out zone: car + keepout_s fore / aft (m)
     margin_d: 0.3              # ... + margin_d sideways (m)
     rear_range: 2.0            # cars behind the ego are ignored unless their front bumper is within this of the
                                # ego's rear bumper (m); cars ahead / alongside always count
@@ -51,36 +41,31 @@ method:
       inner_weight: 10.0
       inner_dist: 0.25         # m from the face where the inner 1/gap^2 barrier starts
     accel_bounds: [-8.0, 2.5]  # m/s^2 (-8 is about where MetaDrive braking stops being linear)
-    max_lat_accel: 9.3         # m/s^2, |v^2 tan(delta) / L| bound; also the validation waypoint check (m3.py).
-                               # 9.3 = the peak of the human demos (keyboard lane changes); was 4.0 (comfort).
-                               # Near MetaDrive's grip (wheel_friction 0.9 -> ~8.8 m/s^2 on a friction circle):
-                               # the kinematic model does not see skidding, so expect some tracking loss up there
+    max_lat_accel: 9.3         # m/s^2, |v^2 tan(delta) / L| bound: the peak of the human drives. Close to MetaDrive's
+                               # grip (~8.8 m/s^2); the kinematic model cannot see skidding, so tracking degrades there
     steer_rate_limit: 0.6      # rad/s
     ceiling_brake: 4.0         # m/s^2; the v* speed ceiling ramps down from the current speed at this rate
-    ebrake_steer: [1.0, 0.3, 0.06]   # emergency-brake steering gains: heading, heading-rate damping, lane pull
+    hold_steer: [1.0, 0.3, 0.06]   # hold-lane fallback steering gains: heading, heading-rate damping, lane pull
     soft_corridor:             # corridor half-spaces A p <= b + sigma, sigma >= 0, cost l1 sum(sigma) + l2 sum(sigma^2)
-      l1: 1000.0               # per m of violation per stage: above the constraint multipliers -> exact penalty
-      l2: 1000.0               # (= the hard corridor whenever it is feasible); the plan's max slack is logged
-                               # (diag corridor_violation)
-    replay_steps:              # failed solve: replay the previous plan this many steps (1 s), then hold speed and
-      timeout: 10              # lane until a solve succeeds; never brakes, never ends the episode. Short: a stale
-      infeasible: 10           # plan replayed for long drove off the road (validate blocked, before the corridor fix)
+      l1: 1000.0               # per m of violation per stage; larger than the constraint multipliers, so the corridor
+      l2: 1000.0               # holds exactly whenever it can. The largest slack is reported as corridor_violation
+    replay_steps:              # failed solve: replay the previous plan for this many steps (1 s), then hold speed
+      timeout: 10              # and lane until a solve succeeds. Kept short: a stale plan replayed for long drives
+      infeasible: 10           # off the road
     solver:
       max_iter: 100
-      max_cpu_time: 0.1        # IPOPT limit in process CPU time (s); exceeding it = timeout. Slow but successful
-                               # solves are always used.
+      max_cpu_time: 0.1        # IPOPT limit in process CPU time (s); exceeding it is a timeout
       tol: 0.001
       print_level: 0
 
-training:                      # 7 h of training (M3's final eval takes longer); the wall clock is the real stop
+training:                      # 7 h of training (M3's final eval takes longer); the wall clock is the stop
   total_control_steps: 10000000
   max_wall_minutes: 420
-  init_default_prob: [0.9, 0.8]   # [keep lane, hold speed]: a lane change tried every ~10 s, the max speed moved
-                               # +-10 km/h on 20 % of decisions (equally often up and down), at first
+  init_default_prob: [0.9, 0.8]   # initial [keep lane, hold speed] probabilities (see m2.yaml)
 
 ppo:
-  n_steps: 128                 # decisions per env per rollout (= 128 s of driving, same as M1 / M2)
+  n_steps: 128                 # decisions per env per rollout = 128 s of driving, same as M1 and M2
   batch_size: 256
-  n_epochs: 4                  # round 2 (r3_fast) ran at approx_kl ~0.05, clip fraction 0.4-0.49: too large, though
-  target_kl: 0.03              # it did not collapse; same guard as M1 / M2
+  n_epochs: 4                  # same update guard as M1 / M2
+  target_kl: 0.03
   ent_coef: 0.01               # discrete actions: a small entropy bonus keeps lane changes in play

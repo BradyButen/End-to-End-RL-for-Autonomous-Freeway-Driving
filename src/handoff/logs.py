@@ -5,9 +5,10 @@
 
 * Every episode -> one row in ``episodes.csv`` (termination, return and per-term returns, speed, jerk, gaps,
   solver stats, ...), returned by the env in ``info["episode_summary"]``.
-* Every eval episode and every Nth training episode (``logging.train_full_log_every``) -> ``episodes/<id>.npz`` with
-  every control step and decision (ego, cars, reward terms, controller diagnostics, references, MPC predictions;
-  M3 corridor every ``logging.tube_every`` steps). Load with ``load_episode``.
+* Every eval episode and every Nth training episode (``logging.train_full_log_every``) -> ``episodes/<id>.npz``:
+  the ego state, controller scalars and raw reward terms at every control step, plus the episode summary. Enough to
+  re-simulate the episode (``view.py replay``) or turn a human drive into training data (``build_demos.py``).
+  Load with ``load_episode``.
 """
 
 from __future__ import annotations
@@ -22,24 +23,18 @@ import numpy as np
 
 from handoff.config import REPO_ROOT, save_config
 from handoff.reward import TERMS, crashed
-from handoff.sim import EGO_FIELDS, OBJECT_FIELDS, EgoState, pack_objects
+from handoff.sim import EGO_FIELDS, EgoState
 
-# infeasible_plan: M3 runs before 2026-11-22 ended on undrivable waypoints; kept as a (now always 0) column so old and
-# new episodes.csv compare. New runs count those plans in infeasible_count instead (they no longer end the episode).
-TERMINATIONS = ("success", "collision", "emergency_brake", "infeasible_plan", "off_road", "timeout", "other")
-STEP_SCALARS = ("reward", "tracking_error", "solve_time", "cpu_time", "fallback", "gated_brake", "min_gap",
-                "min_ttc", "ref_d", "ref_v", "ref_psi", "cmd_steering", "cmd_throttle", "decision_index",
-                "lane")   # lane: the ego's nearest lane, 0 = leftmost (next to the centre line)
+TERMINATIONS = ("success", "collision", "off_road", "timeout", "other")
+STEP_SCALARS = ("reward", "tracking_error", "solve_time", "fallback", "min_gap", "min_ttc")
 
 
 def termination_reason(info: dict, truncated: bool) -> str:
-    """Priority: success > collision > emergency_brake (M3) > off_road > timeout."""
+    """Priority: success > collision > off_road > timeout."""
     if info.get("arrive_dest"):
         return "success"
     if crashed(info):
         return "collision"
-    if info.get("emergency_brake"):
-        return "emergency_brake"
     if info.get("out_of_road"):
         return "off_road"
     if truncated or info.get("max_step"):
@@ -49,11 +44,8 @@ def termination_reason(info: dict, truncated: bool) -> str:
 
 # ======================================================================================= recorder
 class EpisodeRecorder:
-    def __init__(self, out_dir: str | Path | None, max_objects: int, dt: float, max_steering_rad: float,
-                 weights: dict | None = None):
+    def __init__(self, out_dir: str | Path | None, dt: float, max_steering_rad: float):
         self.out_dir = Path(out_dir) if out_dir else None
-        self.weights = weights or {}     # reward weights, saved with the log so it can be re-scored
-        self.max_objects = max_objects
         self.dt = dt
         self.max_steering_rad = max_steering_rad
 
@@ -63,16 +55,8 @@ class EpisodeRecorder:
         self.steps: dict[str, list] = {k: [] for k in (*EGO_FIELDS, *STEP_SCALARS)}
         self.terms: dict[str, list] = {n: [] for n in TERMS}
         self.weighted_sums = {n: 0.0 for n in TERMS}
-        self.status: list[str] = []
-        self.objects, self.object_ids, self.pred_paths = [], [], []
-        self.tube_steps, self.tubes, self.tube_trajs = [], [], []
-        self.dec: dict[str, list] = {"k": [], "control_steps": [], "reward": [], "start_step": [], "infeasible": [],
-                                     "v_target": [], "speed_cmd": []}
-        self.dec_full: dict[str, list] = {"raw_action": [], "decoded": [], "waypoints": []}
-        self.references: list[np.ndarray] = []
 
-    def record_step(self, ego: EgoState, objects, raw: dict, weighted: dict, scalars: dict, status: str,
-                    pred_path=None, tube=None) -> None:
+    def record_step(self, ego: EgoState, raw: dict, weighted: dict, scalars: dict) -> None:
         for f in EGO_FIELDS:
             self.steps[f].append(getattr(ego, f))
         for k in STEP_SCALARS:
@@ -81,37 +65,11 @@ class EpisodeRecorder:
         for n in TERMS:
             self.terms[n].append(raw[n])
             self.weighted_sums[n] += weighted[n]
-        self.status.append(status)
-        if not self.full:
-            return
-        self.objects.append(pack_objects(objects, self.max_objects))
-        self.object_ids.append([o.id for o in objects[: self.max_objects]])
-        self.pred_paths.append(np.zeros((0, 2), np.float32) if pred_path is None else np.asarray(pred_path, np.float32))
-        if tube is not None:
-            self.tube_steps.append(len(self.steps["t"]) - 1)
-            self.tubes.append(np.asarray(tube.corners, np.float32))
-            self.tube_trajs.append(np.asarray(tube.traj, np.float32))
 
-    def record_decision(self, raw_action, decision: dict, reward: float, n_steps: int, start_step: int,
-                        reference=None) -> None:
-        self.dec["k"].append(int(decision.get("k", 0)))
-        self.dec["control_steps"].append(n_steps)
-        self.dec["reward"].append(reward)
-        self.dec["start_step"].append(start_step)
-        self.dec["infeasible"].append(int(not decision.get("feasible", True)))   # M3: plan over max_lat_accel
-        self.dec["v_target"].append(float(decision.get("v_target", np.nan)))     # M2 / M3: the RL's target speed
-        self.dec["speed_cmd"].append(int(decision.get("speed_cmd", -1)))         # M2 / M3: 0 hold, 1 +10, 2 -10
-        if self.full:
-            self.dec_full["raw_action"].append(np.asarray(raw_action, np.float32).ravel())
-            self.dec_full["decoded"].append(np.asarray(decision.get("vector", []), np.float32).ravel())
-            self.dec_full["waypoints"].append(_pad_rows(decision.get("waypoints"), 5))
-            self.references.append(np.zeros((0, 7), np.float32) if reference is None else reference.as_array())
-
-    def finish(self, reason: str, counters: dict) -> dict:
+    def finish(self, reason: str, decisions: int, counters: dict) -> dict:
         steps = {k: np.asarray(v) for k, v in self.steps.items()}
-        decs = {k: np.asarray(v) for k, v in self.dec.items()}
         summary = {"episode_id": self.episode_id, "seed": self.seed, **self.meta,
-                   **episode_metrics(steps, decs, reason, self.dt, self.max_steering_rad)}
+                   **episode_metrics(steps, reason, self.dt, self.max_steering_rad)}
         for n in TERMS:
             summary[f"return_{n}"] = float(self.weighted_sums[n])
             summary[f"raw_{n}"] = float(np.sum(self.terms[n]))
@@ -119,57 +77,21 @@ class EpisodeRecorder:
         summary["return"] = float(np.sum(steps["reward"]))
         summary.update(counters)
         summary["control_steps"] = len(steps["t"])
-        summary["decisions"] = len(decs["k"])
-        summary["log_file"] = self._write_npz(steps, decs, summary) if self.full else ""
+        summary["decisions"] = decisions
+        summary["log_file"] = self._write_npz(steps, summary) if self.full else ""
         return summary
 
-    def _write_npz(self, steps, decs, summary) -> str:
+    def _write_npz(self, steps, summary) -> str:
         self.out_dir.mkdir(parents=True, exist_ok=True)
         path = self.out_dir / f"{self.episode_id}.npz"
         arrays = {f"step_{k}": np.asarray(v, dtype=np.float64) for k, v in steps.items()}
         arrays.update({f"term_{n}": np.asarray(v, np.float64) for n, v in self.terms.items()})
-        arrays.update({f"dec_{k}": np.asarray(v) for k, v in decs.items()})
-        arrays.update({f"dec_{k}": _stack_ragged(v) for k, v in self.dec_full.items()})
-        n = self.max_objects
-        arrays["objects"] = np.stack(self.objects) if self.objects else np.zeros((0, n, len(OBJECT_FIELDS)))
-        arrays["object_fields"] = np.array(OBJECT_FIELDS)
-        arrays["object_ids"] = np.array([ids + [""] * (n - len(ids)) for ids in self.object_ids]
-                                        or np.zeros((0, n)), dtype=object).astype(str)
-        arrays["pred_paths"] = _stack_ragged(self.pred_paths)
-        arrays["status"] = np.array(self.status, dtype=str)
-        arrays["references"] = _stack_ragged(self.references)
-        arrays["tube_steps"] = np.asarray(self.tube_steps, np.int64)
-        arrays["tubes"] = _stack_ragged(self.tubes)              # (n, N+1, 4, 2) corridor box corners
-        arrays["tube_trajs"] = _stack_ragged(self.tube_trajs)    # (n, N+1, 6) [s, d, v, x, y, psi]
-        arrays["term_names"] = np.array(TERMS)
-        arrays["term_weights"] = np.array([float(self.weights.get(n, np.nan)) for n in TERMS])
         arrays["meta_keys"] = np.array(list(summary.keys()), dtype=str)
         arrays["meta_values"] = np.array([str(v) for v in summary.values()], dtype=str)
         tmp = path.with_suffix(".tmp.npz")
         np.savez_compressed(tmp, **arrays)
         os.replace(tmp, path)
         return str(path)
-
-
-def _pad_rows(arr, n: int) -> np.ndarray:
-    out = np.full((n, 2), np.nan, np.float32)
-    if arr is not None:
-        a = np.asarray(arr, np.float32).reshape(-1, 2)[:n]
-        out[: len(a)] = a
-    return out
-
-
-def _stack_ragged(items: list) -> np.ndarray:
-    """Stack arrays of varying first dimension into one NaN-padded array."""
-    if not items:
-        return np.zeros((0,), np.float32)
-    items = [np.asarray(i, np.float32) for i in items]
-    max_len = max(i.shape[0] for i in items)
-    out = np.full((len(items), max_len, *items[0].shape[1:]), np.nan, np.float32)
-    for j, it in enumerate(items):
-        if it.size:
-            out[j, : it.shape[0]] = it
-    return out
 
 
 def load_episode(path: str | Path) -> dict:
@@ -191,7 +113,7 @@ def _stat(fn, x) -> float:
     return float(fn(x)) if len(x) else float("nan")
 
 
-def episode_metrics(steps: dict, decisions: dict, reason: str, dt: float, max_steering_rad: float) -> dict:
+def episode_metrics(steps: dict, reason: str, dt: float, max_steering_rad: float) -> dict:
     v, t = np.asarray(steps["v"], float), np.asarray(steps["t"], float)
     out: dict = {r: float(reason == r) for r in TERMINATIONS}
     out["termination"] = reason
@@ -220,33 +142,6 @@ def episode_metrics(steps: dict, decisions: dict, reason: str, dt: float, max_st
     out["solve_time_p95"] = float(np.percentile(st, 95)) if len(st) else float("nan")
     out["solve_time_max"] = _stat(np.max, st)
     out["fallback_count"] = int(np.nansum(np.asarray(steps["fallback"], float) > 0))
-    out["gated_brake_count"] = int(np.nansum(np.asarray(steps["gated_brake"], float) > 0))
-    ks = np.asarray(decisions["k"], int)
-    for k in range(1, 6):
-        out[f"k{k}_count"] = int(np.sum(ks == k))
-    out["infeasible_count"] = int(np.sum(np.asarray(decisions.get("infeasible", []), int)))   # M3 decisions
-
-    # speed profile (m/s, like mean_speed) and time shares: crawling / stop-and-go that the mean hides
-    out["min_speed"] = _stat(np.min, v)
-    out["max_speed"] = _stat(np.max, v)
-    out["p10_speed"] = float(np.percentile(v, 10)) if len(v) else float("nan")
-    out["frac_time_below_10kmh"] = float(np.mean(v < 10 / 3.6)) if len(v) else float("nan")
-    out["frac_time_above_70kmh"] = float(np.mean(v > 70 / 3.6)) if len(v) else float("nan")
-    ttc = np.asarray(steps["min_ttc"], float)
-    out["frac_time_ttc_below_3s"] = float(np.mean(ttc < 3.0)) if len(ttc) else float("nan")   # risk exposure
-    lane = np.asarray(steps["lane"], float)
-    for i in range(3):                                  # freeway: 3 lanes, 0 = leftmost (fastest offset)
-        out[f"frac_time_lane{i}"] = float(np.mean(lane == i)) if len(lane) else float("nan")
-
-    # M2 / M3 speed commands (NaN / 0 for M1 and B0)
-    vt = np.asarray(decisions.get("v_target", []), float)
-    sc = np.asarray(decisions.get("speed_cmd", []), int)
-    out["n_speed_up"] = int(np.sum(sc == 1))
-    out["n_speed_down"] = int(np.sum(sc == 2))
-    has_vt = len(vt) and np.isfinite(vt).any()
-    out["mean_target_speed"] = float(np.nanmean(vt)) if has_vt else float("nan")
-    out["max_target_speed"] = float(np.nanmax(vt)) if has_vt else float("nan")
-    out["final_target_speed"] = float(vt[np.isfinite(vt)][-1]) if has_vt else float("nan")
     return out
 
 

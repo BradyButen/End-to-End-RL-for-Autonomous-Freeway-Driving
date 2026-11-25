@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Turn human drives (scripts/drive.py logs) into M1's behaviour-cloning dataset (docs/warm-start.md).
+"""Turn human drives (scripts/warm_start/drive.py logs) into M1's behaviour-cloning dataset (docs/GUIDE.md).
 
 The logs hold the ego / car states and the human's controls; the policy's observation is rebuilt by REPLAYING each
 episode headless: same seed, the logged [steering, throttle_brake] fed back step by step (M1 with raw commands,
@@ -9,8 +9,8 @@ termination); a mismatch is reported and the episode skipped. A drive only repla
 with (traffic, map); the spawn speed is read from the drives themselves (their first logged speed), so drives
 recorded at 40 km/h still replay when the training spawn speed differs.
 
-    python scripts/build_demos.py                        # data/human_demos/*.npz -> runs/demos/m1.npz
-    python scripts/build_demos.py data/human_demos/*_s318.npz --out runs/demos/test.npz
+    python scripts/warm_start/build_demos.py             # data/human_demos/*.npz -> runs/demos/m1.npz
+    python scripts/warm_start/build_demos.py data/human_demos/*_s318.npz --out runs/demos/test.npz
 
 Labels, every control step, in M1's action: [lateral accel / steer_lat_accel, target accel / accel_range]: the
 logged steering through the kinematic bicycle at the speed it was applied (m1.steer_to_lat_accel), the logged

@@ -1,10 +1,11 @@
 #!/usr/bin/env python
 """Watch a policy drive in the MetaDrive 3D window with everything the RL and the controller are doing drawn on
 top (needs a display: WSLg / X11). Overlay legend and all keys: src/handoff/viz.py. Keys: Space pause, N step 0.2 s,
-M all overlays, I / D hide / move the text panel, 1-7 one overlay layer each, C screenshot, X end episode.
+M all overlays, I / D hide / move the text panel, 1-6 one overlay layer each, O corridor style, C screenshot,
+X end episode.
 
-Live (an episode report per seed: npz + overview.png + steps.csv in --out):
-    python scripts/view.py live --checkpoint runs/gl_round2/m3 --seeds 1003 1027   # run folder: final.zip, else best
+Live (each episode's full log is written to --out/episodes/<id>.npz):
+    python scripts/view.py live --checkpoint models/m3 --seeds 1003 1027           # run folder: final.zip, else best
     python scripts/view.py live --checkpoint <run>/checkpoints/best.zip --fps 0     # as fast as it renders
     python scripts/view.py live --method b0
     python scripts/view.py live --checkpoint <run> --no-render                      # headless: reports only

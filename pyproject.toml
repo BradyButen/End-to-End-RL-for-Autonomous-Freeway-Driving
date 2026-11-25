@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "handoff"
 version = "0.1.0"
-description = "Nav 565 Team 16: where should learning hand off to control? (MetaDrive freeway study)"
+description = "Where should learning hand off to control? RL vs. RL + PID vs. RL + MPC on a MetaDrive freeway"
 requires-python = ">=3.10,<3.13"
 dependencies = [
     # MetaDrive: the PyPI 0.4.3 wheel is capped at Python <3.12 and pins panda3d 1.10.13 (no cp312 wheels).
@@ -17,8 +17,6 @@ dependencies = [
     "stable-baselines3>=2.3",
     "casadi>=3.6",
     "pyyaml>=6.0",
-    "pandas>=2.0",
-    "matplotlib>=3.8",
 ]
 
 [project.optional-dependencies]

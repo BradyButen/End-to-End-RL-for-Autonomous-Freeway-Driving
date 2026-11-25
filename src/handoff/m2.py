@@ -1,4 +1,4 @@
-"""M2 — RL + PID. Every 5 control steps (0.5 s) the RL picks a lane command and a speed command:
+"""M2: RL + PID. Every 5 control steps (0.5 s) the RL picks a lane command and a speed command:
 
     action MultiDiscrete [3, 3] = [lateral command, speed command]; [0, 0] = keep lane, hold speed (the default)
       lateral  KEEP / LEFT / RIGHT moves the target lane (reference.LaneTarget: one lane at a time, saturating at the
@@ -10,8 +10,8 @@
       -> cascaded PID every control step:
              steering       = PID_heading(psi_ref - psi) + PID_lateral(d_ref - d)    reference at the ego's s
              throttle_brake = PID_speed(v_ref - v) + table^-1(a_ref)                  reference at the next instant
-No safety layer: the RL owns the speed and must learn to brake for cars (M3's MPC does that for it).
-Gains: configs/m2.yaml (tuned with scripts/matlab/m2_pid_tuning.m).
+There is no safety layer: the RL owns the speed and has to learn to brake for cars (in M3 the MPC does that).
+Gains: configs/m2.yaml.
 """
 
 from __future__ import annotations
@@ -75,7 +75,8 @@ class PID:
 
 
 class CascadedPID:
-    """Positive steering turns left and d is positive left, so both lateral errors map directly to + steering."""
+    """Heading + lateral PID on steering, speed PID (+ acceleration feed-forward) on throttle_brake. Positive
+    steering turns left and d is positive to the left, so both lateral errors map directly to positive steering."""
 
     def __init__(self, pid_cfg: dict, actuation: ActuationMap, dt: float):
         lim = float(pid_cfg.get("integral_limit", 5.0))
@@ -98,7 +99,7 @@ class CascadedPID:
         r_t = ref.at_time(t + self.dt)              # longitudinal: time tracking at the next control instant
         speed_err = r_t["v"] - ego.v
         throttle = self.speed(speed_err)
-        if self.feedforward is not None:            # command that produces a_ref (includes coast-drag compensation)
+        if self.feedforward is not None:            # the command that produces a_ref (the table includes coast drag)
             throttle += self.feedforward.accel_to_command(r_t["a"])
         u = np.clip(np.array([steering, throttle], dtype=float), -1.0, 1.0)
         return u, {"tracking_error": abs(cross_track), "cross_track": cross_track, "heading_error": heading_err,
@@ -118,7 +119,7 @@ class M2(Method):
         self.t = 0.0    # time since the current reference was built
 
     ACTION_SPACE = gym.spaces.MultiDiscrete([3, 3])   # [lane command, speed command]
-    COMMAND_FEATURES = ("target_speed",)   # the sticky target speed / v_max ("cmd"; target lane is an ego feature)
+    COMMAND_FEATURES = ("target_speed",)   # observation "cmd": target speed / v_max (the target lane is in "ego")
 
     def target_lane_offset(self) -> int:
         return self.lane.offset(self.env.ego, self.env.road)
@@ -139,7 +140,7 @@ class M2(Method):
         return {**self.set_target(self.lane.lane, self.speed.update(speed_cmd), cmd), "speed_cmd": speed_cmd}
 
     def set_target(self, lane: int, v_star: float, cmd: int = KEEP) -> dict:
-        """Reference to (target lane centre, v*) from here (also scripts/validate.py check m2: scripted targets)."""
+        """Reference to (target lane centre, v*) from here."""
         env = self.env
         self.lane.lane = int(lane)
         d_star = float(env.road.lane_centers[self.lane.lane])
@@ -150,7 +151,7 @@ class M2(Method):
         self.reference = build_m2_reference(env.ego, env.road, d_star, v_star, self.tr_cfg, lat_init,
                                             min_duration=(self.period + 1) * env.dt)
         self.t = 0.0
-        return {"vector": np.array([cmd, self.lane.lane, d_star, v_star]), "k": 0, "lane": self.lane.lane,
+        return {"vector": np.array([cmd, self.lane.lane, d_star, v_star]), "lane": self.lane.lane,
                 "d_target": d_star, "v_target": v_star}
 
     def control(self):

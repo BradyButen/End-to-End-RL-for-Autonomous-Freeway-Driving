@@ -1,8 +1,9 @@
 #!/bin/bash
-# One-time environment setup on Great Lakes (run on a LOGIN node: it needs internet for pip + MetaDrive assets).
+# One-time environment setup on a Slurm cluster with environment modules, e.g. Great Lakes. Run it on a LOGIN
+# node: it needs internet for pip + MetaDrive assets.
 #
-#   bash slurm/setup_greatlakes.sh            # CUDA build of PyTorch (for the gpu / spgpu partitions)
-#   CPU_ONLY=1 bash slurm/setup_greatlakes.sh # CPU-only PyTorch (standard partition)
+#   bash slurm/setup.sh            # CUDA build of PyTorch (for the gpu / spgpu partitions)
+#   CPU_ONLY=1 bash slurm/setup.sh # CPU-only PyTorch (standard partition)
 #
 # Check before running:
 #   * `module avail python` — pick a 3.10–3.12 module (MetaDrive is pinned to a GitHub commit that supports 3.12).
@@ -31,7 +32,7 @@ pip install -e "$REPO_DIR[dev]"
 # MetaDrive downloads its model/texture assets on first use; compute nodes may have no internet, so do it here.
 python -m metadrive.pull_asset
 
-# Smoke: imports (run `python scripts/validate.py check` on a compute node before launching)
+# Smoke: imports
 SDL_VIDEODRIVER=dummy python -c "import torch; print('torch', torch.__version__, 'cuda', torch.cuda.is_available())"
 SDL_VIDEODRIVER=dummy python -c "import handoff.env, handoff.train; print('handoff imports ok')"
 echo "Setup done: source $VENV/bin/activate"

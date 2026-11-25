@@ -1,0 +1,233 @@
+experiment:
+  method: m3
+  reward_variant: r5
+  scenario: freeway
+  seed: 0
+  runs_root: runs
+sim:
+  physics_world_step_size: 0.02
+  decision_repeat: 5
+  control_dt: 0.1
+  store_map: false
+  horizon: 1500
+  on_continuous_line_done: true
+  log_level: 50
+  render_clean: false
+  metadrive_overrides:
+    force_destroy: true
+  map:
+    blocks: SSSSSSSSSSSSSSSS
+    lane_num: 3
+    lane_width: 3.5
+  ego:
+    vehicle_model: static_default
+    spawn_speed_km_h: 40
+    spawn_lane: null
+    max_steering_deg: 40
+    max_speed_km_h: 80
+    front_wheelbase: 1.05234
+    rear_wheelbase: 1.4166
+    length: 4.515
+    width: 1.852
+  perception_range: 50.0
+  target_speed_km_h: 70
+  v_cap_km_h: 80
+observation:
+  range: 100.0
+lane_action:
+  settle: 0.5
+  speed_step_km_h: 10
+actuation:
+  table:
+  - - -1.0
+    - -15.805
+  - - -0.6
+    - -11.703
+  - - -0.3
+    - -7.936
+  - - -0.15
+    - -4.091
+  - - -0.05
+    - -1.364
+  - - 0.0
+    - -0.364
+  - - 0.02
+    - 0.058
+  - - 1.0
+    - 2.909
+logging:
+  full_log_eval: true
+  train_full_log_every: 50
+  tube_every: 10
+  max_logged_objects: 10
+eval:
+  n_episodes: 40
+  n_workers: 4
+  freq_control_steps: 500000
+  deterministic: true
+training:
+  total_control_steps: 10000000
+  max_wall_minutes: 420
+  progress_seconds: 20
+  n_envs: 14
+  checkpoint_freq_control_steps: 500000
+  device: auto
+  torch_threads: 2
+  gamma_ref: 0.999
+  gae_lambda_ref: 0.995
+  normalize_reward: true
+  reward_clip: 100.0
+  watchdog_minutes: 15
+  init_policy: null
+  init_log_std: null
+  init_default_prob:
+  - 0.9
+  - 0.8
+  critic_warmup_control_steps: 0
+ppo:
+  learning_rate: 0.0003
+  n_steps: 128
+  batch_size: 256
+  n_epochs: 4
+  clip_range: 0.2
+  ent_coef: 0.01
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  policy_kwargs:
+    net_arch:
+    - 256
+    - 256
+    log_std_init: -0.7
+  target_kl: 0.03
+scenario:
+  name: freeway
+  traffic:
+    density: 0.15
+    speed_km_h: 40
+    lane_speed_offset_km_h:
+    - 5
+    - 0
+    - -5
+    mode: Trigger
+    release_all_at_reset: true
+  seeds:
+    train_low: 0
+    train_high: 1000
+    eval:
+    - 1000
+    - 1001
+    - 1002
+    - 1003
+    - 1004
+    - 1005
+    - 1006
+    - 1007
+    - 1008
+    - 1009
+    - 1010
+    - 1011
+    - 1012
+    - 1013
+    - 1014
+    - 1015
+    - 1016
+    - 1017
+    - 1018
+    - 1019
+    - 1020
+    - 1021
+    - 1022
+    - 1023
+    - 1024
+    - 1025
+    - 1026
+    - 1027
+    - 1028
+    - 1029
+    - 1030
+    - 1031
+    - 1032
+    - 1033
+    - 1034
+    - 1035
+    - 1036
+    - 1037
+    - 1038
+    - 1039
+method:
+  name: m3
+  decision_period: 10
+  lane_plan:
+    duration: 2.5
+    max_lat_accel: 5.0
+    min_length: 15.0
+    ahead: 150.0
+  spline:
+    ds: 1.0
+    extend: 80.0
+  ebrake:
+    gate: false
+    gate_decel: 6.0
+    ends_episode: true
+  corridor:
+    inset: -0.3
+    keepout_s: 1.0
+    margin_d: 0.3
+    rear_range: 2.0
+    accel: 2.0
+    brake: 4.0
+  mpc:
+    horizon: 50
+    dt: 0.1
+    steer_lag: 0.1
+    weights:
+      lateral: 2.0
+      heading: 2.0
+      speed: 0.5
+      steer: 1.0
+      accel: 0.05
+      steer_rate: 20.0
+      accel_rate: 0.5
+      terminal_factor: 3.0
+      yaw_rate: 20.0
+    barrier:
+      weight: 1.0
+      dist: 0.5
+      inner_weight: 10.0
+      inner_dist: 0.25
+    accel_bounds:
+    - -8.0
+    - 2.5
+    max_lat_accel: 9.3
+    steer_rate_limit: 0.6
+    ceiling_brake: 4.0
+    ebrake_steer:
+    - 1.0
+    - 0.3
+    - 0.06
+    soft_corridor:
+      l1: 1000.0
+      l2: 1000.0
+    replay_steps:
+      timeout: 10
+      infeasible: 10
+    solver:
+      max_iter: 100
+      max_cpu_time: 0.1
+      tol: 0.001
+      print_level: 0
+reward:
+  name: r5
+  weights:
+    progress: 0.0225
+    speed: 0.4
+    speed_gap: 4.2
+    success: 150.0
+    collision: -4000.0
+    off_road: -4000.0
+    lane_keep: 2.0
+    heading: 0.9
+    steer_rate: 0.06
+    headway: 0.5
+    time: 0.0
+    lane_change: 0.0

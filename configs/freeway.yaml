@@ -1,18 +1,17 @@
-# Stock MetaDrive straight freeway with MetaDrive's own traffic (PGTrafficManager, stock IDMPolicy cars, cruise
-# speed overridden to traffic.speed_km_h). Cars are placed randomly over the route (all blocks but the first) and
-# all drive from t = 0 at that speed. Each seed = a different map (block lengths drawn from the seed) + traffic.
+# Straight MetaDrive freeway with MetaDrive's own traffic (PGTrafficManager, IDM cars at our cruise speeds). Cars are
+# placed randomly over the route (every block but the first) and all drive from t = 0. Each seed is a different map
+# (block lengths drawn from the seed) and traffic.
 experiment:
   scenario: freeway
 
 scenario:
   name: freeway
   traffic:
-    density: 0.15         # MetaDrive traffic_density (vehicles per 10 m of lane, roughly); round 1 was 0.1
+    density: 0.15         # MetaDrive traffic_density (roughly vehicles per 10 m of lane): ~35 cars per episode
     speed_km_h: 40        # IDM cruise speed of traffic (MetaDrive's built-in is 30); null = stock
     lane_speed_offset_km_h: [5, 0, -5]   # added per lane (0 = left, by the centre line): 45 / 40 / 35 km/h
     mode: Trigger         # MetaDrive TrafficMode: Trigger = random positions over every block but the first
     release_all_at_reset: true   # all cars drive from t = 0 at speed_km_h (no waiting for the ego to reach a block)
-    lane_change: true     # false: traffic cars keep their lane (still car-following); the ego's IDM (B0) is unaffected
 
   seeds:
     # MetaDrive seeds. Training draws from [train_low, train_high); evaluation uses the fixed list below.

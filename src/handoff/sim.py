@@ -1,14 +1,13 @@
-"""Everything about the simulator: MetaDrive setup, the road (Frenet) frame, ego / car state, traffic speeds,
-scripted cars and the throttle/brake <-> acceleration table. No RL and no controllers here.
+"""Everything about the simulator: MetaDrive setup, the road (Frenet) frame, ego / car state, traffic speeds and
+the throttle_brake <-> acceleration table. No RL and no controllers here.
 
-MetaDrive is used stock (configured, never patched): MetaDriveEnv (its own observation is ignored: the policy's is
-built from ground-truth state in env.py), its PG
-map ("S" blocks = straight road, block lengths drawn from the seed), its PGTrafficManager (IDM cars) and its own
-success / crash / out-of-road rules.
+MetaDrive is used stock (configured, never patched): MetaDriveEnv (its own observation is ignored; env.py builds
+the policy's from ground-truth state), its procedurally generated map ("S" blocks = straight road, lengths drawn
+from the seed), its PGTrafficManager (IDM cars) and its own success / crash / out-of-road rules.
 
-Frenet conventions (used everywhere):
-  * s = arc length (m) along the route; d = lateral offset (m), positive to the LEFT of the driving direction;
-  * reference line = centre of MetaDrive lane 0 (the lane next to the centre line), so lane centres are
+Frenet conventions, used everywhere:
+  * s = arc length (m) along the route; d = lateral offset (m), positive to the LEFT of the driving direction.
+  * The reference line is the centre of MetaDrive lane 0 (the lane next to the centre line), so lane centres are
     d = 0, -3.5, -7.0; ``d_max`` / ``d_min`` are the left (centre line) and right road edges.
 """
 
@@ -32,24 +31,22 @@ def wrap_angle(a):
 def make_metadrive_config(cfg: dict, render: bool = False, agent_policy=None) -> dict:
     """MetaDrive config dict from our YAML. ``agent_policy``: MetaDrive policy class driving the ego (None = our
     env action; B0 passes IDMPolicy)."""
-    from metadrive.component.pgblock.first_block import FirstPGBlock
     from metadrive.manager.traffic_manager import TrafficMode
     from metadrive.policy.env_input_policy import EnvInputPolicy
 
     sim, traffic = cfg["sim"], cfg["scenario"]["traffic"]
     seeds = cfg["scenario"]["seeds"]
-    spawn_lane = sim["ego"].get("spawn_lane")            # None = random lane every episode
     clean = render and bool(sim.get("render_clean", False))   # no MetaDrive navigation marks / dashboard
     md = dict(
         use_render=render,
         log_level=sim.get("log_level", 50),
         physics_world_step_size=sim["physics_world_step_size"],
         decision_repeat=sim["decision_repeat"],
-        horizon=sim.get("timeout_steps") or sim["horizon"],   # episode cap (robustness: a longer timeout)
+        horizon=sim["horizon"],
         start_seed=0,
-        store_map=bool(sim.get("store_map", False)),   # MetaDrive default True keeps every visited map (~10 MB each,
-                                                       # up to num_scenarios per process): the memory growth that
-                                                       # OOM-killed runs. False rebuilds the seed's map on reset.
+        store_map=bool(sim.get("store_map", False)),   # MetaDrive's default (True) caches every visited map,
+                                                       # ~10 MB each, until memory runs out; False rebuilds the
+                                                       # seed's map on reset instead
         num_scenarios=max(int(seeds["train_high"]), max(int(s) for s in seeds["eval"]) + 1),
         map=sim["map"]["blocks"],
         map_config={"lane_num": sim["map"]["lane_num"], "lane_width": sim["map"]["lane_width"]},
@@ -57,7 +54,7 @@ def make_metadrive_config(cfg: dict, render: bool = False, agent_policy=None) ->
         traffic_mode=getattr(TrafficMode, traffic.get("mode", "Trigger")),
         random_traffic=False,                        # traffic tied to the seed (reproducible episodes)
         need_inverse_traffic=False,
-        random_spawn_lane_index=spawn_lane is None,
+        random_spawn_lane_index=True,                 # random spawn lane every episode
         vehicle_config=dict(
             vehicle_model=sim["ego"]["vehicle_model"],
             spawn_velocity=[sim["ego"]["spawn_speed_km_h"] / 3.6, 0.0],
@@ -76,10 +73,6 @@ def make_metadrive_config(cfg: dict, render: bool = False, agent_policy=None) ->
     )
     if clean:
         md["show_interface"] = False
-    if spawn_lane is not None:
-        md["agent_configs"] = {"default_agent": {
-            "use_special_color": True,
-            "spawn_lane_index": (FirstPGBlock.NODE_1, FirstPGBlock.NODE_2, int(spawn_lane))}}
     md.update(sim.get("metadrive_overrides") or {})   # raw MetaDrive passthrough
     return md
 
@@ -217,7 +210,6 @@ class TrackedObject:
 ObjectList = list[TrackedObject]
 EGO_FIELDS = ("t", "x", "y", "psi", "v", "s", "d", "psi_err", "steering", "throttle_brake", "lane_index",
               "length", "width")
-OBJECT_FIELDS = ("x", "y", "psi", "v", "vx", "vy", "s", "d", "length", "width")   # packed-array column order
 
 
 def extract_ego(md, road: RoadFrame, t: float) -> EgoState:
@@ -231,11 +223,11 @@ def extract_ego(md, road: RoadFrame, t: float) -> EgoState:
                     length=float(a.LENGTH), width=float(a.WIDTH))
 
 
-def extract_objects(md, road: RoadFrame, radius: float, extra_vehicles=()) -> ObjectList:
-    """Traffic (+ scripted) cars within ``radius`` of the ego, nearest first (ground truth)."""
+def extract_objects(md, road: RoadFrame, radius: float) -> ObjectList:
+    """Traffic cars within ``radius`` of the ego, nearest first (ground truth)."""
     ex, ey = md.agent.position
     out = []
-    for veh in list(md.engine.traffic_manager._traffic_vehicles) + list(extra_vehicles):
+    for veh in md.engine.traffic_manager._traffic_vehicles:
         x, y = veh.position
         dist = float(np.hypot(x - ex, y - ey))
         if dist > radius:
@@ -260,14 +252,6 @@ def frenet_velocity(obj, road: RoadFrame) -> tuple[float, float]:
     return float(c * vx + s_ * vy), float(-s_ * vx + c * vy)
 
 
-def pack_objects(objects: ObjectList, max_n: int) -> np.ndarray:
-    """(max_n, len(OBJECT_FIELDS)) array, NaN-padded, nearest first."""
-    arr = np.full((max_n, len(OBJECT_FIELDS)), np.nan, dtype=np.float32)
-    for i, o in enumerate(objects[:max_n]):
-        arr[i] = [getattr(o, f) for f in OBJECT_FIELDS]
-    return arr
-
-
 def box_gap(ego: EgoState, obj: TrackedObject) -> float:
     """Clearance (m) between the ego and car footprints as road-aligned boxes; 0 when overlapping."""
     lon = abs(obj.s - ego.s) - 0.5 * (obj.length + ego.length)
@@ -286,19 +270,19 @@ def time_to_collision(ego: EgoState, obj: TrackedObject, road: RoadFrame) -> flo
 
 
 # ======================================================================================= traffic
-MIN_TRAFFIC_KMH = 1.0   # MetaDrive's IDM divides by the cruise speed: a 0 km/h lane (robustness: 5 - 5) runs at 1
+MIN_TRAFFIC_KMH = 1.0   # floor on cruise speeds: MetaDrive's IDM divides by it
 
 
 class TrafficSpeeds:
-    """Traffic cruise speeds: ``scenario.traffic.speed_km_h`` + a per-lane offset (``lane_speed_offset_km_h``,
-    indexed by MetaDrive lane, 0 = next to the centre line), re-read from each car's current lane every step."""
+    """Traffic cruise speeds: ``scenario.traffic.speed_km_h`` plus a per-lane offset (``lane_speed_offset_km_h``,
+    indexed by MetaDrive lane, 0 = next to the centre line). Each car's speed follows its current lane, so a car
+    that changes lanes takes on that lane's speed."""
 
     def __init__(self, traffic_cfg: dict):
         ts = traffic_cfg.get("speed_km_h")
         self.base = None if ts is None else float(ts)
         self.offsets = [float(x) for x in traffic_cfg.get("lane_speed_offset_km_h") or []]
         self.release_all_at_reset = bool(traffic_cfg.get("release_all_at_reset", False))
-        self.lane_change = bool(traffic_cfg.get("lane_change", True))
 
     def speed_kmh(self, veh) -> float:
         v = self.base
@@ -311,8 +295,8 @@ class TrafficSpeeds:
         return max(v, MIN_TRAFFIC_KMH)
 
     def on_reset(self, md) -> None:
-        """Trigger-mode placement (random positions over every block but the first), but every car drives from
-        t = 0 instead of waiting for the ego to reach its block, starting at its cruise speed."""
+        """Keep MetaDrive's Trigger-mode placement (random positions over every block but the first), but release
+        every car at t = 0 at its cruise speed instead of waiting for the ego to reach its block."""
         if self.release_all_at_reset:
             tm = md.engine.traffic_manager
             for group in getattr(tm, "block_triggered_vehicles", []):
@@ -325,14 +309,12 @@ class TrafficSpeeds:
         self.apply(md)
 
     def apply(self, md) -> None:
-        """Set each traffic car's IDM cruise speed from its current lane. IDMPolicy resets ``target_speed`` from
-        ``NORMAL_SPEED`` every step; set per policy instance, so B0's ego IDM keeps its own. Same for lane changes
-        (``lane_change: false`` turns them off for traffic only)."""
+        """Set each traffic car's IDM cruise speed from its current lane. Set per policy instance, so B0's own IDM
+        (driving the ego) keeps its speed. IDMPolicy resets ``target_speed`` from ``NORMAL_SPEED`` every step, hence
+        both are written."""
         engine = md.engine
         for veh in engine.traffic_manager._traffic_vehicles:
             pol = engine.get_policy(veh.id)
-            if pol is not None and not self.lane_change:
-                pol.enable_lane_change = False
             if self.base is None:
                 continue
             v = self.speed_kmh(veh)
@@ -341,25 +323,11 @@ class TrafficSpeeds:
                 pol.target_speed = v
 
 
-def spawn_car(md, road: RoadFrame, s: float, d: float, static: bool = True):
-    """A scripted car (same body as the ego) at (s, d), facing along the road. Static cars are frozen; moving ones
-    are driven by DrivingEnv (``add_scripted_car``)."""
-    from metadrive.component.vehicle.vehicle_type import TrafficDefaultVehicle
-
-    x, y = road.to_world(float(s), float(d))
-    veh = md.engine.spawn_object(TrafficDefaultVehicle, vehicle_config={"spawn_velocity": None},
-                                 position=[x, y], heading=float(road.heading_at(float(s))))
-    veh.set_velocity([0.0, 0.0])
-    if static:
-        veh.set_static(True)
-    return veh
-
-
 # ======================================================================================= actuation
 class ActuationMap:
-    """Longitudinal acceleration (m/s^2) <-> MetaDrive ``throttle_brake``, as a measured monotone lookup table
-    (``actuation.table`` in base.yaml, from scripts/calibrate_actuation.py). Brake response is strongly nonlinear
-    (about -8 m/s^2 at -0.3, -15.8 at -1), hence a table rather than gains."""
+    """Longitudinal acceleration (m/s^2) <-> MetaDrive ``throttle_brake``, through a monotone lookup table measured
+    open loop on an empty road (``actuation.table`` in base.yaml). The brake response is strongly nonlinear (about
+    -8 m/s^2 at -0.3, -15.8 m/s^2 at -1), hence a table rather than a gain."""
 
     def __init__(self, table):
         arr = np.asarray(table, dtype=float)

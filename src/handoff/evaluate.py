@@ -1,7 +1,7 @@
 """Evaluation: run a policy (an SB3 policy, or none for B0) on fixed seeds, deterministically.
 
-``ParallelEvaluator`` runs the eval envs in their own subprocesses (one MetaDrive per process), so it can be used
-from inside training (every eval.freq_control_steps) and by scripts/evaluate.py.
+``ParallelEvaluator`` runs the eval envs in their own subprocesses (one MetaDrive per process). Training uses it
+every ``eval.freq_control_steps``, and scripts/warm_start/bc.py uses it to pick the best clone.
 """
 
 from __future__ import annotations
@@ -48,8 +48,8 @@ def load_policy_fn(checkpoint: str | Path | None, deterministic: bool = True, cf
 
 
 def check_spaces(model, cfg: dict, checkpoint) -> None:
-    """Raise a clear error when a checkpoint's observation / action spaces differ from today's for its method
-    (trained on an older version of the code: it cannot drive in the current env)."""
+    """Raise a clear error when a checkpoint's observation or action space differs from the current code's for its
+    method (it was trained on an older version and cannot drive in the current env)."""
     from handoff.env import method_class, observation_space
 
     want_obs = observation_space(cfg)
@@ -61,11 +61,10 @@ def check_spaces(model, cfg: dict, checkpoint) -> None:
         bad.append(f"action {model.action_space} != current {want_act}")
     if bad:
         raise SystemExit(f"{checkpoint} was trained with an older version of the code and cannot run in the current "
-                         f"env ({'; '.join(bad)}). Its logged episodes can still be plotted: "
-                         "python scripts/plot.py episode <run>/episodes/<id>.npz")
+                         f"env ({'; '.join(bad)}).")
 
 
-def _const_lr(_progress):   # picklable stand-in for SB3's lr schedule (unused at inference)
+def _const_lr(_progress):   # picklable stand-in for SB3's learning-rate schedule (unused at inference)
     return 0.0
 
 

@@ -1,6 +1,6 @@
 """What M2 and M3 share: the RL's lane and speed choice (``LaneTarget``, ``SpeedTarget``), the reference path their
-controllers track (M2: quintic trajectory in time; M3: ``LanePlan``, a quintic in arc length, or a waypoint spline in
-validation), and the quintic polynomial both are built from. Pure numpy."""
+controllers track (M2: quintic trajectory in time; M3: ``LanePlan``, a quintic in arc length), and the quintic
+polynomial both are built from. Pure numpy."""
 
 from __future__ import annotations
 
@@ -38,10 +38,6 @@ class Reference:
         out["s"] = float(s)
         return out
 
-    def as_array(self) -> np.ndarray:
-        """(n, 7) [t, s, d, x, y, psi, v] for logging."""
-        return np.stack([self.t, self.s, self.d, self.x, self.y, self.psi, self.v], axis=1).astype(np.float32)
-
 
 def quintic_coefficients(d0: float, dd0: float, ddd0: float, d1: float, T: float) -> np.ndarray:
     """c0..c5 of d(t) = sum c_i t^i with d(0) = d0, d'(0) = dd0, d''(0) = ddd0, d(T) = d1, d'(T) = d''(T) = 0."""
@@ -67,10 +63,9 @@ HOLD, FASTER, SLOWER = 0, 1, 2  # the RL's speed command; HOLD is index 0, the d
 
 
 class SpeedTarget:
-    """The target speed the RL moves with relative commands (configs/base.yaml ``lane_action``): FASTER / SLOWER
-    change it by ``speed_step_km_h``, HOLD keeps it, within [0, v_cap]. Sticky: a target persists until changed, so
-    the policy commits to a speed (an absolute speed level redrawn every decision let M2 dither between levels and
-    average to traffic speed, which only worked while actions were sampled). Starts at the ego's speed on reset."""
+    """The target speed, moved by relative commands (configs/base.yaml ``lane_action``): FASTER / SLOWER change it
+    by ``speed_step_km_h`` within [0, v_cap], HOLD keeps it. The target persists until changed, so the policy
+    commits to a speed instead of dithering between levels. Starts at the ego's speed on reset."""
 
     def __init__(self, cfg: dict, v_cap: float):
         self.step = float(cfg["speed_step_km_h"]) / 3.6
@@ -89,11 +84,11 @@ class SpeedTarget:
 
 
 class LaneTarget:
-    """The target lane the RL steers with relative commands (configs/base.yaml ``lane_action``).
+    """The target lane, moved by relative commands (configs/base.yaml ``lane_action``).
 
-    LEFT / RIGHT move the target one lane (lane 0 = next to the centre line = leftmost; saturates at the edge
-    lanes), KEEP holds it. A lane change, once started, runs to completion: while the ego is more than ``settle`` m
-    from the target lane's centre, new commands are ignored (no dithering mid-manoeuvre)."""
+    LEFT / RIGHT move the target by one lane (lane 0 is the leftmost, next to the centre line; saturates at the
+    edges), KEEP holds it. A lane change runs to completion: while the ego is more than ``settle`` m from the target
+    lane's centre, new commands are ignored."""
 
     def __init__(self, cfg: dict):
         self.settle = float(cfg["settle"])

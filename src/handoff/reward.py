@@ -1,29 +1,26 @@
 """Reward: a weighted sum of raw terms, computed every control step and summed over a decision by the env. Terminal
-terms are added on the step the episode ends.
+terms are added on the step the episode ends. Weights live in configs/r5.yaml.
 
-r5 (configs/r5.yaml): progress and speed EARN every step of normal driving (so quitting never pays), a quadratic
-speed shortfall makes crawling cost (so crawling never pays), a crash costs a lot. Raw terms, per control step:
+The idea behind r5: progress and speed earn reward on every step of normal driving, so ending the episode early
+never pays; a quadratic shortfall from the speed cap makes crawling expensive; a crash costs more than any finish.
 
-    progress      Δs since the previous step (m)
-    speed         +(v / v_max)^2: quadratic in speed (1 at 80 km/h, 0.32 at 45, 0 stopped)
-    speed_gap     -((v - v_max) / v_max)^2: quadratic shortfall from the 80 km/h cap (-1 stopped, -0.25 at 40 km/h,
-                  0 at 80); steepest where the car is slowest, so crawling is the most expensive way to drive
-    success       1 on route completion (MetaDrive arrive_dest)
-    collision     1 on a crash, or an M3 emergency brake (gate) ending the episode
-    off_road      1 when out of road (incl. crossing the centre line / road edge)
-    lane_keep     -(offset / half a lane width)^2, offset = the ego centre's distance from its nearest lane centre:
-                  0 centred, -0.11 at 0.57 m, -1 on a lane line. Smooth, so every correction toward the centre pays.
-                  A lane change averages about -1/3 over the ~2 s it takes; riding a line costs the full -1
-    heading       -(|heading error| - 0.5 deg), when positive (rad): straight driving costs nothing, slow weaving does
-    steer_rate    -|change of the lateral acceleration the steering asks for| (m/s^2) since the previous step, with
-                  a_lat = v^2 tan(steering angle) / wheelbase: rapid oscillation / jitter. Speed-aware, so the same
-                  wheel twitch costs more at 80 km/h than in a car park. A smooth lane change ~ -12 m/s^2 in total
-    headway       -(1 - headway / HEADWAY_S) when positive, for the nearest car overlapping the ego sideways ahead
-                  (headway = bumper gap / ego speed) or behind (gap / its speed: cutting in front of it): 0 at 0.5 s
-                  or more, -1 at contact. Tailgating closer than 0.5 s is charged; closer than that is a near miss
-    time          -1                                           (logged only in r5)
-    lane_change   lanes changed this step: counts once the ego centre settles within 0.3 lane widths of a new
-                  lane's centre (two lanes at once = 2)       (logged only: the lane_changes metric)
+Raw terms, per control step:
+    progress      distance travelled along the road since the previous step (m)
+    speed         (v / v_max)^2: 1 at 80 km/h, 0.32 at 45 km/h, 0 stopped
+    speed_gap     -((v - v_max) / v_max)^2: -1 stopped, -0.25 at 40 km/h, 0 at 80 km/h. Steepest where the car is
+                  slowest, so crawling is the costliest way to drive
+    success       1 on reaching the end of the route
+    collision     1 on a crash
+    off_road      1 on leaving the road (including crossing the centre line)
+    lane_keep     -(offset / half a lane width)^2, offset = distance from the nearest lane centre: 0 centred,
+                  -1 on a lane line. Smooth, so every correction toward the centre pays
+    heading       -(|heading error| - 0.5 deg) in rad, when positive: straight driving is free, weaving is not
+    steer_rate    -|change in the lateral acceleration the steering asks for| (m/s^2), with
+                  a_lat = v^2 tan(steering angle) / wheelbase. Speed-aware: the same twitch costs more at speed
+    headway       -(1 - headway / 0.5 s) when positive, for the nearest car in line with the ego, ahead (gap / ego
+                  speed: tailgating) or behind (gap / its speed: cutting in). 0 at 0.5 s or more, -1 at contact
+    lane_change   lanes changed this step, counted once the ego settles near the new lane's centre (logged only:
+                  feeds the lane_changes metric)
 """
 
 from __future__ import annotations
@@ -32,9 +29,8 @@ import numpy as np
 
 from handoff.sim import EgoState, ObjectList, RoadFrame
 
-TERMS = ("progress", "speed", "speed_gap", "time", "success", "collision", "off_road", "lane_keep", "heading",
+TERMS = ("progress", "speed", "speed_gap", "success", "collision", "off_road", "lane_keep", "heading",
          "steer_rate", "headway", "lane_change")
-TERMINAL = ("success", "collision", "off_road")   # charged once, on the step the episode ends
 LANE_SETTLE = 0.3   # fraction of a lane width
 HEADING_DEADBAND = float(np.deg2rad(0.5))   # rad; heading error below this is free
 HEADWAY_S = 0.5     # s; time headway below which following (or being followed after a cut-in) is charged
@@ -53,7 +49,7 @@ class Reward:
         self.wheelbase, self.max_steering_rad = float(wheelbase), float(max_steering_rad)
         weights = reward_cfg["weights"]
         unknown = [n for n, w in weights.items() if n not in TERMS and float(w) != 0.0]
-        if unknown:   # weight-0 entries for removed terms (old run configs) are ignored
+        if unknown:   # zero-weight entries for unknown terms are ignored
             raise ValueError(f"Unknown reward terms with non-zero weight: {unknown}")
         self.weights = {n: float(weights.get(n, 0.0)) for n in TERMS}
         self.road: RoadFrame | None = None
@@ -68,10 +64,9 @@ class Reward:
         raw = {
             "progress": ego.s - prev.s,
             "speed": (ego.v / self.v_max) ** 2,
-            "time": -1.0,
             "speed_gap": -((ego.v - self.v_max) / self.v_max) ** 2,
             "success": float(bool(info.get("arrive_dest"))),
-            "collision": float(crashed(info) or bool(info.get("emergency_brake"))),
+            "collision": float(crashed(info)),
             "off_road": float(bool(info.get("out_of_road"))),
             "lane_keep": -self._lane_offset(ego) ** 2,
             "heading": -max(abs(ego.psi_err) - HEADING_DEADBAND, 0.0),

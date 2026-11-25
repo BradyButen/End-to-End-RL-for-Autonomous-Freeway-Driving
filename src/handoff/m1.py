@@ -1,18 +1,18 @@
 """M1 (end-to-end RL) and B0 (rule-based baseline).
 
-M1: the RL action is [lateral accel, longitudinal accel], applied every control step. No controller. Both are in
-    physical units, so the same action (and the same exploration noise) means the same thing at every speed:
-    * lateral: a target lateral acceleration, +-method.steer_lat_accel (0 = straight), turned into a wheel angle for
-      the current speed with the kinematic bicycle, delta = atan(L a_lat / v^2) (speeds below V_STEER_MIN use
-      V_STEER_MIN). Raw steering (+-1 = +-40 deg of wheel) made nearly the whole range "leave the road" at speed:
-      the warm start's noise (std 0.135 = 5.4 deg) asked for ~19 m/s^2 at 80 km/h, twice the grip.
-    * accel: a target acceleration (0 = hold speed), mapped to throttle_brake through the measured actuation table:
-      raw throttle_brake is ~5x stronger on the brake side, so zero-mean noise on it netted out to hard braking.
-    ``steer_lat_accel`` / ``accel_range`` null = raw [steering, throttle_brake] (scripts/build_demos.py replays the
-    logged human commands that way).
-B0: MetaDrive's stock IDMPolicy drives the ego at the 70 km/h target speed (car following + its own lane changes);
-    the action is ignored. Evaluation only. Its ``cmd_*`` log columns are the dummy [0, 0]; IDM's real commands
-    are the ego's ``steering`` / ``throttle_brake``.
+M1: the action is [lateral acceleration, longitudinal acceleration], applied every control step with no controller
+    in between. Both are in physical units, so an action (and the exploration noise on it) means the same thing at
+    every speed:
+    * lateral: a target lateral acceleration in +-``method.steer_lat_accel`` (0 = straight), turned into a wheel
+      angle for the current speed with the kinematic bicycle, delta = atan(L a_lat / v^2). Raw steering would make
+      small actions violent at speed: 5 deg of wheel asks for ~19 m/s^2 at 80 km/h, twice the available grip.
+    * longitudinal: a target acceleration (0 = hold speed), turned into throttle_brake through the measured
+      actuation table. Raw throttle_brake is ~5x stronger on the brake side, so zero-mean noise would mean braking.
+    Setting ``steer_lat_accel`` / ``accel_range`` to null passes raw [steering, throttle_brake] through instead
+    (scripts/warm_start/build_demos.py replays human drives that way).
+B0: MetaDrive's IDMPolicy drives the ego at the 70 km/h target speed (car following and its own lane changes); the
+    action is ignored. Evaluation only. Its ``cmd_*`` log columns are a dummy [0, 0]; IDM's real commands are in
+    the ego's ``steering`` / ``throttle_brake`` columns.
 """
 
 from __future__ import annotations
@@ -61,10 +61,10 @@ class M1(Method):
             steer = float(lat_accel_to_steer(a_lat, self.env.ego.v, self.wheelbase, self.env.max_steering_rad))
         if self.a_max is None:
             self.u = np.array([steer, x])
-            return {"vector": np.array([a_lat, x]), "k": 0}
+            return {"vector": np.array([a_lat, x])}
         acc = x * (self.a_max if x >= 0 else -self.a_min)        # piecewise linear, 0 -> 0 m/s^2 (hold speed)
         self.u = np.array([steer, np.clip(self.actuation.accel_to_command(acc), -1.0, 1.0)])
-        return {"vector": np.array([a_lat, acc]), "k": 0}
+        return {"vector": np.array([a_lat, acc])}
 
     def control(self):
         return self.u, {}
@@ -86,4 +86,4 @@ class B0(M1):
 
     def decide(self, action):
         self.u = np.zeros(2)          # ignored: IDMPolicy drives
-        return {"vector": self.u.copy(), "k": 0}
+        return {"vector": self.u.copy()}

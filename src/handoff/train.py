@@ -1,15 +1,15 @@
 """PPO training (Stable-Baselines3, MultiInputPolicy), identical for M1 / M2 / M3.
 
-Budgets and cadences (total, eval, checkpoint) are counted in CONTROL STEPS (0.1 s of simulated driving, summed
-over envs), so every method gets the same simulated experience whatever its decision period. ``max_wall_minutes``
-is a safety stop on top (Slurm time cap): the loop (step-0 eval included) stops after that long, then the final
-eval and final.zip still run, so leave room for them before the job's time limit.
-gamma and GAE lambda are set per 0.1 s and scaled to the decision period (x ** (T_decision / 0.1 s)) so every method
-has the same lookahead / credit window in seconds. Rationale for every setting: docs/TRAINING.md.
-
-Robustness: a crashed env / eval worker ends the job (FAILED.txt, checkpoints/crash.zip, all children killed,
-non-zero exit); the watchdog kills it (exit 3) if nothing progresses for ``training.watchdog_minutes``: env start-up,
-every PPO env step, every finished eval episode and the final shutdown all count as progress.
+* Budgets and cadences (total, eval, checkpoint) count CONTROL STEPS (0.1 s of simulated driving, summed over
+  envs), so every method gets the same simulated experience whatever its decision period.
+* ``max_wall_minutes`` is a wall-clock stop on top, for cluster time limits: after that long the training loop
+  stops, then the final eval and final.zip still run, so leave room for them before the job's limit.
+* gamma and GAE lambda are given per 0.1 s and scaled to each method's decision period (x ** (T_decision / 0.1 s)),
+  so every method has the same lookahead and credit window in seconds.
+* Failure handling: a crashed env or eval worker ends the job (FAILED.txt, checkpoints/crash.zip, all child
+  processes killed, non-zero exit). A watchdog ends it with exit code 3 if nothing progresses for
+  ``training.watchdog_minutes``; env start-up, every env step, every finished eval episode and the final shutdown
+  count as progress.
 """
 
 from __future__ import annotations
@@ -34,10 +34,9 @@ from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNorm
 from handoff.evaluate import ParallelEvaluator, aggregate, policy_spec  # noqa: E402
 from handoff.logs import CsvAppender, make_run_dir  # noqa: E402
 
-EVAL_LOG_METRICS = ("success", "collision", "emergency_brake", "infeasible_count", "off_road", "timeout", "return",
-                    "mean_speed",
+EVAL_LOG_METRICS = ("success", "collision", "off_road", "timeout", "return", "mean_speed",
                     "min_gap", "min_ttc", "rms_long_jerk", "rms_lat_accel", "rms_steer_rate", "tracking_error_rms",
-                    "solve_time_mean", "solve_time_p95", "fallback_count", "gated_brake_count", "lane_changes",
+                    "solve_time_mean", "solve_time_p95", "fallback_count", "lane_changes",
                     "time_to_complete")
 
 
@@ -174,8 +173,8 @@ def init_exploration(model, cfg: dict) -> str | None:
     Box (M1): ``training.init_log_std``, one number or one per action dimension (null = ppo.policy_kwargs.
       log_std_init), so each dimension's noise can be sized from what it does to the car.
     Discrete / MultiDiscrete (M2, M3): ``training.init_default_prob``, one number or one per action component: the
-      initial probability of index 0 (keep lane / v_cap), the rest shared equally by the other choices. Set through
-      the action head's bias (its weights start ~0, so the initial policy is the same for every observation)."""
+      initial probability of index 0 (keep lane / hold speed), the rest shared equally by the other choices. Set
+      through the action head's bias (its weights start near 0, so the initial policy is the same everywhere)."""
     import gymnasium as gym
 
     tr, policy = cfg["training"], model.policy
@@ -231,7 +230,7 @@ class TrainingCallback(BaseCallback):
         self.best = (-np.inf, -np.inf)
         self.evaluator: ParallelEvaluator | None = None
         self.recent: list[dict] = []
-        # critic warm-up (warm start only): actor frozen until this many control steps
+        # critic warm-up (warm start only): the actor stays frozen for this many control steps
         self.warmup = int(float(tr.get("critic_warmup_control_steps") or 0)) if tr.get("init_policy") else 0
         self.actor_frozen = False
 
@@ -282,8 +281,7 @@ class TrainingCallback(BaseCallback):
                 self.recent = (self.recent + [summ])[-100:]
         self.episodes_csv.write(rows)
         if rows:
-            for k in ("success", "collision", "emergency_brake", "infeasible_count", "off_road", "return",
-                      "mean_speed"):
+            for k in ("success", "collision", "off_road", "return", "mean_speed"):
                 self.logger.record(f"train/{k}", float(np.mean([r[k] for r in self.recent])))
         self.logger.record("counters/control_steps", self.control_steps)
         self.logger.record("counters/decisions", self.decisions)
@@ -320,8 +318,7 @@ class TrainingCallback(BaseCallback):
                f"{self.episodes} ep | {self.rollouts} rollouts | mem {_rss_gb():.1f} GB")
         recent = self.recent[-50:]
         if recent:
-            crash = np.mean([max(r["collision"], r["emergency_brake"], r["off_road"])
-                             for r in recent])
+            crash = np.mean([max(r["collision"], r["off_road"]) for r in recent])
             msg += (f" | last {len(recent)} ep: return {np.mean([r['return'] for r in recent]):7.1f}, "
                     f"success {np.mean([r['success'] for r in recent]):.2f}, crash {crash:.2f}, "
                     f"{np.mean([r['mean_speed'] for r in recent]) * 3.6:4.1f} km/h, "
@@ -360,7 +357,7 @@ class TrainingCallback(BaseCallback):
 # ======================================================================================= entry point
 def train(cfg: dict, run_dir: str | Path | None = None, verbose: int = 1) -> Path:
     if cfg["method"]["name"] == "b0":
-        raise ValueError("B0 is not trained; use scripts/evaluate.py")
+        raise ValueError("B0 is not trained; watch it with scripts/view.py live --method b0")
     run_dir = make_run_dir(cfg, run_dir)
     tr = cfg["training"]
     seed = int(cfg["experiment"]["seed"])

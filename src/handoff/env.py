@@ -2,24 +2,22 @@
 
 One RL step = one decision:
 
-    decision = method.decide(action)              # M1: the controls; M2: target lane + speed; M3: target lane
+    decision = method.decide(action)              # M1: the controls; M2 / M3: target lane + target speed
     for j in range(method.period):                # M1 1, M2 5, M3 10 control steps (0.1 s each)
         u, diag = method.control()                # [steering, throttle_brake] (+ controller diagnostics)
         MetaDrive step -> ego / cars -> reward -> log
         if the episode ended: break
     return obs, reward summed over the decision, ...
 
-Same world observation and reward for every method:
-  * obs (ground truth, like a tracking stack's output; ``observation_space``):
-      "ego":   EGO_FEATURES (speed, position in the road and in the lane, heading error, last applied steering /
-               throttle, target lane relative to the current one (M2 / M3 lane change in progress; 0 for M1), time
-               left): every method, unchanged since data/bc/m1_clone.zip was built (do not reorder or extend it:
-               M1's clone would no longer fit)
-      "lanes": for the lanes left of / at / right of the ego: exists, then the nearest car ahead and behind in that
-               lane (LANE_SLOT each), out to observation.range (100 m): every method
-      "cmd":   extra command state of a method, ``Method.COMMAND_FEATURES`` (M2 / M3: the target speed); absent for
-               M1 / B0, so M2 / M3 additions go here and never change M1's inputs
-  * reward = reward.py (configs/r5.yaml by default), summed undiscounted over the decision's control steps.
+Every method sees the same world and earns the same reward:
+  * observation: ground truth, like the output of a tracking stack (``observation_space``):
+      "ego":   EGO_FEATURES. Frozen: data/bc/m1_clone.zip was trained on exactly this vector, so do not reorder or
+               extend it
+      "lanes": for the lane to the left, the ego's lane and the lane to the right: whether it exists, then the
+               nearest car ahead and behind (LANE_SLOT each) within observation.range
+      "cmd":   a method's own command state, ``Method.COMMAND_FEATURES`` (M2 / M3: the target speed); absent for
+               M1 / B0. New method-specific inputs go here so M1's inputs never change
+  * reward: reward.py, summed (undiscounted) over the decision's control steps.
 
 A method is a small class (m1.py, m2.py, m3.py) with ``period``, ``action_space``, ``reset()``, ``decide(action)``
 and ``control()``; it reads the world from the env (``env.ego``, ``env.objects``, ``env.road``).
@@ -46,7 +44,6 @@ from handoff.sim import (
     extract_objects,
     frenet_velocity,
     make_metadrive_env,
-    spawn_car,
     time_to_collision,
 )
 
@@ -59,7 +56,7 @@ EGO_FEATURES = (
     "steering",        # last applied steering command
     "throttle_brake",  # last applied throttle / brake command
     "target_lane",     # target lane - current lane, in lanes (+ left); M2 / M3 mid lane change, M1 always 0
-    "t_left",          # time left / episode cap (sim.horizon): with a long discount the value depends on it
+    "t_left",          # time left / episode cap: with a ~100 s discount horizon, the value depends on it
 )
 LANE_SLOT = (          # the nearest car ahead (or behind) in one lane
     "present",         # 1 = a car, 0 = none within range (then: gap 1, dd the lane's offset, dv 0, inv_ttc 0)
@@ -73,7 +70,7 @@ LANE_OVERLAP = 0.3     # m: a car occupies a lane when it reaches this far into 
 
 
 def observation_space(cfg: dict) -> gym.spaces.Dict:
-    """The policy's observation space for this config's method (also used by scripts/bc.py)."""
+    """The policy's observation space for this config's method (also used by scripts/warm_start/bc.py)."""
     n_lanes = len(LANES) * (1 + 2 * len(LANE_SLOT))
     spaces = {"ego": gym.spaces.Box(-5.0, 5.0, shape=(len(EGO_FEATURES),), dtype=np.float32),
               "lanes": gym.spaces.Box(-5.0, 5.0, shape=(n_lanes,), dtype=np.float32)}
@@ -127,8 +124,8 @@ class Method:
         self.reference = None     # what the controller tracks (M2 / M3), drawn by the viewer and logged
 
     COMMAND_FEATURES: tuple = ()   # extra command state in the observation ("cmd"); none for M1 / B0
-    ACTION_SPACE: gym.Space | None = None   # the RL action space (class-level, so checkpoints can be checked without
-                                            # an env); None = not checked (B0)
+    ACTION_SPACE: gym.Space | None = None   # class-level, so a checkpoint can be checked against it without an
+                                            # env; None = not checked (M1 / B0)
 
     def target_lane_offset(self) -> int:
         """Target lane - current lane (ego feature ``target_lane``); M2 / M3 override it, M1 / B0 0."""
@@ -147,13 +144,13 @@ class Method:
         self.reference = None
 
     def decide(self, action: np.ndarray) -> dict:
-        """Turn the RL action into this decision's plan. Returns a dict for logs / viewer; keys used by the logs:
-        ``vector`` (decoded action), ``k`` (M3 waypoint count), ``waypoints`` (M3 (k, 2) s, d)."""
+        """Turn the RL action into this decision's plan. Returns a dict the viewer shows (``vector`` = the decoded
+        action, plus method-specific targets)."""
         raise NotImplementedError
 
     def control(self) -> tuple[np.ndarray, dict]:
-        """[steering, throttle_brake] in [-1, 1]^2 for this control step, and a diagnostics dict (see
-        ``DrivingEnv._log_step`` for the keys that are logged)."""
+        """[steering, throttle_brake] in [-1, 1]^2 for this control step, and a diagnostics dict for the logs
+        (``DrivingEnv._log_step``) and the viewer."""
         raise NotImplementedError
 
 
@@ -191,10 +188,8 @@ class DrivingEnv(gym.Env):
         log = cfg["logging"]
         self.full_log_eval = bool(log["full_log_eval"])
         self.full_every = int(log["train_full_log_every"])
-        self.tube_every = max(1, int(log["tube_every"]))
-        self.recorder = EpisodeRecorder((Path(run_dir) / "episodes") if run_dir else None,
-                                        int(log["max_logged_objects"]), self.dt, self.max_steering_rad,
-                                        weights=self.reward.weights)
+        self.recorder = EpisodeRecorder((Path(run_dir) / "episodes") if run_dir else None, self.dt,
+                                        self.max_steering_rad)
         seeds = cfg["scenario"]["seeds"]
         self.train_seeds = (int(seeds["train_low"]), int(seeds["train_high"]))
         self._seed_rng = np.random.default_rng([int(cfg["experiment"]["seed"]), rank, int(is_eval)])
@@ -203,12 +198,10 @@ class DrivingEnv(gym.Env):
         self.ego: EgoState | None = None
         self.objects: ObjectList = []   # cars within perception_range (controllers, reward, logs), nearest first
         self.seen: ObjectList = []      # cars within observation.range (the policy's observation)
-        self.scripted_cars: list = []   # (MetaDrive vehicle, speed m/s) spawned by validation; perceived like traffic
         self.decision: dict = {}        # the current decision (method.decide output)
         self.on_step = None             # viewer hook: callable(env, diag) after every control step
         self.total_control_steps = self.total_decisions = self.total_episodes = 0
         self.episode_control_steps = self.episode_decisions = 0
-        self.episode_open = False
 
         self.method = cls(cfg, self)
         self.action_space = self.method.action_space
@@ -223,7 +216,6 @@ class DrivingEnv(gym.Env):
         options = options or {}
         ep_seed = options.get("episode_seed")
         self.episode_seed = int(self._seed_rng.integers(*self.train_seeds) if ep_seed is None else ep_seed)
-        self.scripted_cars = []
         self.md.reset(seed=self.episode_seed)
         self.traffic.on_reset(self.md)
         self.road = build_road_frame(self.md)   # each seed has its own map
@@ -240,21 +232,15 @@ class DrivingEnv(gym.Env):
         self.recorder.start(self.episode_id, self.episode_seed, full,
                             meta={"method": self.cfg["experiment"]["method"],
                                   "reward_variant": self.cfg["experiment"]["reward_variant"],
-                                  "is_eval": int(self.is_eval), "rank": self.rank,
-                                  "n_cars": len(self.md.engine.traffic_manager._traffic_vehicles)})
+                                  "is_eval": int(self.is_eval), "rank": self.rank})
         self.total_episodes += 1
-        self.episode_open = True
         self.decision = {}
-        self._ahead: dict = {}                  # car id -> ahead of the ego last step (overtake counting)
-        self._speeds = self._speeds_before = ({}, self.ego.v)   # ({car id: v}, ego v) now / one step earlier
-        self.cars_passed = self.passed_by = 0
         self.method.reset()
         return self._obs(), {"episode_seed": self.episode_seed, "episode_id": self.episode_id}
 
     def step(self, action):
         action = np.asarray(action)
         self.decision = self.method.decide(action)
-        start = self.episode_control_steps
         total, n = 0.0, 0
         for _ in range(self.method.period):
             u, diag = self.method.control()
@@ -263,7 +249,6 @@ class DrivingEnv(gym.Env):
             n += 1
             if terminated or truncated:
                 break
-        self.recorder.record_decision(action, self.decision, total, n, start, self.method.reference)
         self.episode_decisions += 1
         self.total_decisions += 1
         info["decision_control_steps"] = n
@@ -275,49 +260,7 @@ class DrivingEnv(gym.Env):
 
     def end_episode(self, reason: str) -> dict:
         """Close the episode's log (also for scripts that stop an episode early) -> episode summary."""
-        self.episode_open = False
-        return {**self.recorder.finish(reason, self.counters()), **self._episode_extras(reason)}
-
-    def _track_passes(self) -> None:
-        """Overtakes: a car seen ahead and now behind = passed; behind and now ahead = passed by (env.objects).
-        Also keeps the speeds one step back: at a collision the physics has already changed them."""
-        self._speeds_before, self._speeds = self._speeds, ({o.id: o.v for o in self.objects}, self.ego.v)
-        for o in self.objects:
-            ahead = o.s > self.ego.s
-            was = self._ahead.get(o.id)
-            if was is True and not ahead:
-                self.cars_passed += 1
-            elif was is False and ahead:
-                self.passed_by += 1
-            self._ahead[o.id] = ahead
-
-    def _episode_extras(self, reason: str) -> dict:
-        """Summary fields from the env's state at the end: overtakes, route, and what a collision was.
-
-        crash_type: rear_end (ego hit a car ahead), hit_from_behind, side (contact on the long sides: lane-change
-        swipe), off_road, other (collision with no tracked car nearby) or "" (no crash). Speeds in m/s, taken one
-        control step (0.1 s) before contact; closing speed = how fast the gap was shrinking."""
-        out = {"cars_passed": self.cars_passed, "passed_by": self.passed_by, "route_length": self.road.length,
-               "route_completion": min(max(self.ego.s / max(self.road.length, 1e-6), 0.0), 1.0),
-               "crash_type": "off_road" if reason == "off_road" else "", "crash_ego_speed": float("nan"),
-               "crash_other_speed": float("nan"), "crash_closing_speed": float("nan")}
-        if reason == "collision":
-            cars_before, ego_v = self._speeds_before
-            out["crash_type"], out["crash_ego_speed"] = "other", float(ego_v)
-            if self.objects:
-                o = min(self.objects, key=lambda c: box_gap(self.ego, c))
-                o_v = float(cars_before.get(o.id, o.v))
-                ds, dd = o.s - self.ego.s, o.d - self.ego.d
-                lon = abs(ds) - 0.5 * (o.length + self.ego.length)    # separation along / across the road; the
-                lat = abs(dd) - 0.5 * (o.width + self.ego.width)      # larger one is the face that touched
-                if lon >= lat:
-                    out["crash_type"] = "rear_end" if ds > 0 else "hit_from_behind"
-                    out["crash_closing_speed"] = (ego_v - o_v) if ds > 0 else (o_v - ego_v)
-                else:
-                    out["crash_type"] = "side"
-                    out["crash_closing_speed"] = abs(ego_v - o_v)
-                out["crash_other_speed"] = o_v
-        return out
+        return self.recorder.finish(reason, self.episode_decisions, self.counters())
 
     def close(self):
         self.md.close()
@@ -326,14 +269,6 @@ class DrivingEnv(gym.Env):
         return {"total_control_steps": self.total_control_steps, "total_decisions": self.total_decisions,
                 "total_sim_time": self.total_control_steps * self.dt, "total_episodes": self.total_episodes}
 
-    def add_scripted_car(self, s: float, d: float, speed_kmh: float = 0.0):
-        """Validation: a car at (s, d); speed 0 = static, otherwise held at that speed along the road."""
-        veh = spawn_car(self.md, self.road, s, d, static=speed_kmh <= 0)
-        self.scripted_cars.append((veh, kmh(speed_kmh)))
-        self._drive_scripted_cars()
-        self._extract_objects()
-        return veh
-
     # ------------------------------------------------------------------ one control step
     def _control_step(self, u: np.ndarray, diag: dict):
         prev = self.ego
@@ -341,60 +276,34 @@ class DrivingEnv(gym.Env):
         _, _, terminated, truncated, info = self.md.step(u)
         info = dict(info)
         self.traffic.apply(self.md)
-        self._drive_scripted_cars()
-        if diag.get("ebrake_terminal"):          # M3: emergency brake ends the run, scored as a collision
-            info["emergency_brake"] = True
-            terminated = True
         self.episode_control_steps += 1
         self.total_control_steps += 1
         self.ego = extract_ego(self.md, self.road, self.episode_control_steps * self.dt)
         self._extract_objects()
-        self._track_passes()
         total, raw, weighted = self.reward.step(prev, self.ego, info, self.objects)
-        self._log_step(u, diag, total, raw, weighted)
+        self._log_step(diag, total, raw, weighted)
         info["reward_terms"] = raw
         if self.on_step is not None:
             self.on_step(self, diag)
         return self._obs(), total, bool(terminated), bool(truncated), info
 
-    def _log_step(self, u, diag: dict, total: float, raw: dict, weighted: dict) -> None:
+    def _log_step(self, diag: dict, total: float, raw: dict, weighted: dict) -> None:
         gaps = [box_gap(self.ego, o) for o in self.objects]
         ttcs = [time_to_collision(self.ego, o, self.road) for o in self.objects]
         scalars = {
             "reward": total,
             "tracking_error": diag.get("tracking_error"),
             "solve_time": diag.get("solve_time", 0.0),
-            "cpu_time": diag.get("cpu_time", 0.0),
             "fallback": float(bool(diag.get("fallback"))),
-            "gated_brake": float(bool(diag.get("gated_brake"))),
             "min_gap": min(gaps) if gaps else self.radius,
             "min_ttc": min(ttcs) if ttcs else np.inf,
-            "ref_d": diag.get("ref_d"),
-            "ref_v": diag.get("ref_v"),
-            "ref_psi": diag.get("ref_psi"),
-            "cmd_steering": u[0],
-            "cmd_throttle": u[1],
-            "decision_index": self.episode_decisions,
-            "lane": self.road.nearest_lane(self.ego.d),
         }
-        status = str(diag.get("status", ""))
-        if diag.get("fallback"):
-            status = f"fallback:{diag.get('fallback_reason', '')}:{diag.get('fallback_mode', '')}"
-        tube = diag.get("tube") if self.episode_control_steps % self.tube_every == 0 else None
-        self.recorder.record_step(self.ego, self.objects, raw, weighted, scalars, status,
-                                  pred_path=diag.get("pred_xy"), tube=tube)
-
-    def _drive_scripted_cars(self) -> None:
-        for veh, v in self.scripted_cars:
-            if v > 0:
-                h = float(self.road.heading_at(self.road.to_frenet(*veh.position)[0]))
-                veh.set_velocity([v * np.cos(h), v * np.sin(h)])
+        self.recorder.record_step(self.ego, raw, weighted, scalars)
 
     def _extract_objects(self) -> None:
         """env.seen (observation range) and env.objects (perception range: what the controllers see)."""
         e = self.ego
-        self.seen = extract_objects(self.md, self.road, max(self.obs_range, self.radius),
-                                    [veh for veh, _ in self.scripted_cars])
+        self.seen = extract_objects(self.md, self.road, max(self.obs_range, self.radius))
         self.objects = [o for o in self.seen if np.hypot(o.x - e.x, o.y - e.y) <= self.radius]
 
     def _obs(self) -> dict:

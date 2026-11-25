@@ -1,36 +1,34 @@
-"""M3's model-predictive controller: CasADi + IPOPT, built once, warm-started every control step.
+"""M3's model-predictive controller: CasADi + IPOPT, built once and warm-started every control step.
 
     step(ego, tube) -> [steering, throttle_brake], diagnostics
 
-Model: kinematic bicycle about the CG, state [x, y, psi, v, delta_act], input [delta_cmd (rad), a (m/s^2)],
-beta = atan(lr / (lf + lr) * tan delta_act); the wheel angle follows the command through a first-order lag
-(steer_lag, measured), RK4 over dt. Horizon N stages of dt.
+Model: kinematic bicycle about the centre of gravity, state [x, y, psi, v, delta_act], input [delta_cmd (rad),
+a (m/s^2)], slip angle beta = atan(lr / (lf + lr) tan delta_act). The wheel angle follows the command through a
+first-order lag (``steer_lag``, measured). RK4 integration over N stages of dt.
 
-Cost (stages 1..N, last stage x terminal_factor), tracking the tube's trajectory (the spline at the v* ramp):
-    w_lat e_lat^2 + w_head (psi - psi_ref)^2 + w_speed (v - v_ref)^2           tracking
-    + w_steer delta^2 + w_accel a^2 + w_steer_rate d_delta^2 + w_accel_rate d_a^2  effort and rates
-    + w_yaw_rate ((psi_k - psi_k-1) / dt)^2                                     damps heading oscillation
-    + barrier on the tube's left / right faces (see ``_barrier``)
-    + l1 sum(sigma) + l2 sum(sigma^2)                                          corridor violation (soft_corridor)
-Constraints: tube A_k p_k <= b_k + sigma_k, sigma_k >= 0 (SOFT: 4 half-spaces per stage on the ego centre, each
-with a slack; with l1 above the constraint multipliers this is an exact penalty, i.e. the hard corridor whenever
-that is feasible, and the least-violating plan when it is not: car already outside a face, a cut-in inside stopping
-distance), |delta| <= delta_max, a in accel_bounds, |d_delta| <= steer_rate_limit dt, 0 <= v <= v_limit(t),
-|v^2 tan(delta) / L| <= max_lat_accel.
-Speed ceiling: the RL's v* (``set_speed_limit``), ramped down from the current speed at ceiling_brake m/s^2 so it
-never makes the problem infeasible by itself.
+Cost over stages 1..N (the last one scaled by terminal_factor), tracking the tube's trajectory:
+    w_lat e_lat^2 + w_head (psi - psi_ref)^2 + w_speed (v - v_ref)^2              tracking
+    + w_steer delta^2 + w_accel a^2 + w_steer_rate d_delta^2 + w_accel_rate d_a^2   effort and rates
+    + w_yaw_rate ((psi_k - psi_k-1) / dt)^2                                      damps heading oscillation
+    + a barrier near the tube's left / right faces (``_barrier``)
+    + l1 sum(sigma) + l2 sum(sigma^2)                                           corridor violation
+Constraints:
+  * corridor: A_k p_k <= b_k + sigma_k, sigma_k >= 0, four half-spaces per stage on the ego centre, each with a
+    slack. With l1 larger than the constraint multipliers this is an exact penalty: the plan respects the corridor
+    whenever that is possible, and is the least-violating plan when it is not (e.g. a car cutting in inside
+    stopping distance), instead of an infeasible problem;
+  * |delta| <= delta_max, a within accel_bounds, |d_delta| <= steer_rate_limit dt;
+  * |v^2 tan(delta) / L| <= max_lat_accel;
+  * 0 <= v <= the speed ceiling: the RL's v* (``set_speed_limit``), ramped down from the current speed at
+    ceiling_brake m/s^2 so the ceiling alone never makes the problem infeasible.
 
-Failures (solve time is process CPU time; a successful solve is always used, however long it took). With the soft
-corridor the problem is essentially always feasible; what remains is timeouts / numerical failures:
-  * retry once in the same step from a full-braking initial guess along the planned path (the first solve after a
-    car becomes unavoidable can need ~250 IPOPT iterations from the previous, cruising plan, ~35 from a braking one;
-    offline: stopped car 25 m ahead at 72 km/h, 346 ms -> 49 ms);
-  * replay the previous plan for up to replay_steps.timeout (.infeasible) steps;
-  * then (or with no plan yet) "hold_lane": zero acceleration (the actuation table's hold-speed command), steering
-    that holds the road heading and pulls to the nearest lane centre, until a solve succeeds again. Never ends the
-    episode and never brakes (no emergency brake in the MPC).
-Emergency brake (``brake``): full brake with the same steering law. Only M3's gate uses it (ebrake.gate, off by
-default).
+Failures (solve time is measured in process CPU time; a successful solve is always used, however long it took).
+With the soft corridor the problem is essentially always feasible, so failures are timeouts or numerical:
+  1. retry once in the same step from a full-braking initial guess. When a car suddenly has to be braked for, the
+     previous (cruising) plan is a poor starting point; a braking guess converges several times faster;
+  2. replay the previous plan for up to ``replay_steps`` control steps;
+  3. then (or with no plan yet) ``hold_lane``: hold speed, steer to hold the road heading and the nearest lane
+     centre, until a solve succeeds again. Never brakes and never ends the episode.
 """
 
 from __future__ import annotations
@@ -60,7 +58,6 @@ class MPC:
         self.ceiling_brake = float(cfg["ceiling_brake"])
         self.replay = {"infeasible": int(cfg["replay_steps"]["infeasible"]),
                        "timeout": int(cfg["replay_steps"]["timeout"])}
-        self.constraints_on = True   # validation switch: False replaces the tube by always-true half-spaces
         self.road: RoadFrame | None = None
         self._build()
         self.reset(None)
@@ -80,10 +77,10 @@ class MPC:
         return x + dt / 6 * (k1 + 2 * k2 + 2 * k3 + k4)
 
     def _barrier(self, gap):
-        """Cost of the ego centre being ``gap`` m inside a lateral tube face. Two zones, each 0 with zero slope at
-        its start: outer (gap < dist, 0.5 m) a gentle log, inner (gap < inner_dist, 0.25 m) growing like 1/gap^2.
-        Defaults (weight 1, inner_weight 10): gap 0.40 -> 0.02, 0.25 -> 0.19, 0.15 -> 4.9, 0.10 -> 23, 0.05 -> 161.
-        gap is floored at 1 mm so the terms stay finite if a solver iterate crosses the face."""
+        """Cost of the ego centre being ``gap`` m inside a lateral tube face. Two zones, each starting at 0 with
+        zero slope: an outer one (gap < dist) that grows gently like a log, and an inner one (gap < inner_dist) that
+        grows like 1/gap^2. With the defaults: gap 0.40 m -> 0.02, 0.25 -> 0.19, 0.15 -> 4.9, 0.05 -> 161. The gap
+        is floored at 1 mm so the cost stays finite if a solver iterate crosses the face."""
         b = self.cfg["barrier"]
         g = ca.fmax(gap, 1e-3)
         r = g / float(b["dist"])
@@ -165,7 +162,7 @@ class MPC:
         self.u_prev = np.zeros(2)      # [delta, a] last applied
         self.delta_act = 0.0           # estimated actual wheel angle (lag-filtered commands)
         self._clear_plan()
-        self._eb_prev = None           # previous heading error of the emergency-brake law
+        self._hold_prev = None         # previous heading error of the hold-lane steering law
 
     def _clear_plan(self) -> None:
         self._prev_X = self._prev_U = self._prev_S = None
@@ -187,7 +184,7 @@ class MPC:
             sol, status2, ok = self._solve(self._brake_guess(ego, tube), p, ubx)
             status, retried = (status2 if ok else status), True
         diag = {"solve_time": time.perf_counter() - t0, "cpu_time": time.process_time() - c0, "status": status,
-                "fallback": not ok, "fallback_reason": "", "fallback_mode": "", "fallback_terminal": False,
+                "fallback": not ok, "fallback_reason": "", "fallback_mode": "",
                 "v_limit": self.v_limit, "ref_v": float(ref[3, 1]), "corridor_violation": 0.0,
                 "retried": retried}
         if ok:
@@ -217,28 +214,22 @@ class MPC:
             diag["fallback_mode"] = "shifted_previous"
             diag["pred_xy"] = self._prev_X[:2, self._shift:].T.copy()
             return self._apply(delta, acc), diag
-        diag["fallback_mode"] = "hold_lane"     # no plan left: hold speed and lane until a solve succeeds
+        diag["fallback_mode"] = "hold_lane"     # nothing left to replay: hold speed and lane
         diag["pred_xy"] = np.array([[ego.x, ego.y]])
         return self.hold_lane(ego), diag
 
-    def brake(self, ego: EgoState) -> np.ndarray:
-        """Emergency brake: full brake with the lane-holding steering law (``_lane_steer``)."""
-        return self._lane_steer(ego, -1.0)
-
     def hold_lane(self, ego: EgoState) -> np.ndarray:
-        """Zero acceleration (hold speed) with the lane-holding steering law: the MPC fallback."""
-        return self._lane_steer(ego, float(np.clip(self.actuation.accel_to_command(0.0), -1.0, 1.0)))
-
-    def _lane_steer(self, ego: EgoState, throttle_brake: float) -> np.ndarray:
-        """Steering u = k_h e_psi + k_r (e_psi - e_psi_prev) + k_l (d_lane - d), with e_psi = road heading - ego
-        heading and d_lane the nearest lane centre (gains ``ebrake_steer``), and the given throttle_brake. Clears the
-        warm start and keeps u_prev / the steering-lag estimate consistent for when the MPC takes over again."""
-        kh, kr, kl = (float(x) for x in self.cfg["ebrake_steer"])
+        """The last-resort fallback: hold speed (zero acceleration) and steer u = k_h e_psi + k_r (e_psi - e_psi_prev)
+        + k_l (d_lane - d), with e_psi = road heading - ego heading and d_lane the nearest lane centre (gains
+        ``hold_steer``). Clears the warm start and keeps u_prev / the steering-lag estimate consistent for when the
+        MPC takes over again."""
+        throttle_brake = float(np.clip(self.actuation.accel_to_command(0.0), -1.0, 1.0))
+        kh, kr, kl = (float(x) for x in self.cfg["hold_steer"])
         road = self.road
         lane_d = road.lane_centers[road.nearest_lane(ego.d)]
         e_psi = float(wrap_angle(road.heading_at(ego.s) - ego.psi))
-        de = 0.0 if self._eb_prev is None else e_psi - self._eb_prev
-        self._eb_prev = e_psi
+        de = 0.0 if self._hold_prev is None else e_psi - self._hold_prev
+        self._hold_prev = e_psi
         u = np.array([float(np.clip(kh * e_psi + kr * de + kl * (lane_d - ego.d), -1.0, 1.0)), throttle_brake])
         self._clear_plan()
         self.u_prev = np.array([u[0] * self.delta_max, self.actuation.command_to_accel(u[1])])
@@ -248,7 +239,7 @@ class MPC:
     # ------------------------------------------------------------------ helpers
     def _apply(self, delta: float, acc: float) -> np.ndarray:
         """Apply an MPC input (fresh or replayed plan)."""
-        self._eb_prev = None      # the e-brake law's derivative restarts at the next emergency brake
+        self._hold_prev = None    # the hold-lane law's derivative restarts at the next fallback
         self.u_prev = np.array([delta, acc])
         self._advance_lag(delta)
         return np.array([float(np.clip(delta / self.delta_max, -1.0, 1.0)),
@@ -267,9 +258,6 @@ class MPC:
         ref[2] = ego.psi + wrap_angle(tr[:, 5] - ego.psi)
         ref[3] = tr[:, 2]
         half = np.concatenate([tube.A[: N + 1], tube.b[: N + 1, :, None]], axis=2)   # (N+1, 4, 3)
-        if not self.constraints_on:
-            half = np.zeros_like(half)
-            half[:, :, 2] = 1e6
         x0 = np.array([ego.x, ego.y, ego.psi, ego.v, self.delta_act])
         return np.concatenate([x0, self.u_prev, ref.T.ravel(), half.ravel()]), ref
 

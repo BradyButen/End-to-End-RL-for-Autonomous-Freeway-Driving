@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """Behaviour cloning (BC) of M1 from human drives: fit PPO's own policy network to the human's actions.
 
-Input: the dataset from scripts/build_demos.py (runs/demos/m1.npz). Output: a run folder that looks like a PPO run,
-so the clone can be driven / evaluated with the normal tools and loaded as a PPO warm start (training.init_policy):
+Input: the dataset from scripts/warm_start/build_demos.py (runs/demos/m1.npz). Output: a run folder that looks like a
+PPO run, so the clone can be watched with scripts/view.py and loaded as a PPO warm start (training.init_policy):
 
     runs/bc/m1/<timestamp>/
         config.yaml               M1's config (+ a "bc" section with these settings)
@@ -10,14 +10,14 @@ so the clone can be driven / evaluated with the normal tools and loaded as a PPO
         bc_progress.csv           per-epoch train / validation losses, steering metrics, driving results
         bc_summary.json           dataset split, settings, best epoch
 
-    python scripts/bc.py                                     # defaults: 40 epochs, 3 held-out episodes
-    python scripts/bc.py --epochs 5                          # quick smoke run
-    python scripts/bc.py --weight-decay 0.05 --max-weight 3  # regularised variant
-    python scripts/evaluate.py --checkpoint runs/bc/m1/<ts>/checkpoints/best.zip --n-workers 4   # drive it
+    python scripts/warm_start/bc.py                          # defaults: 40 epochs, 3 held-out episodes
+    python scripts/warm_start/bc.py --epochs 5               # quick smoke run
+    python scripts/warm_start/bc.py --weight-decay 0.05 --max-weight 3  # regularised variant
+    python scripts/view.py live --checkpoint runs/bc/m1/<ts>                       # watch it drive
 
 The network is exactly the one scripts/train.py builds (PPO "MultiInputPolicy" with M1's ppo kwargs: the
 observation vectors concatenated -> policy MLP -> action mean). Only the actor (policy MLP, action head) is trained;
-the critic and log_std keep their initial values (the warm start handles those: docs/warm-start.md).
+the critic and log_std keep their initial values (the warm start handles those: docs/GUIDE.md).
 
 Two guards against the usual BC failure modes:
   * copycat: the ego vector holds the PREVIOUS step's steering / throttle_brake, which almost equals the label (the
@@ -170,7 +170,7 @@ def main():
     stale = [k for k, s in space.items() if f"obs_{k}" not in z.files or z[f"obs_{k}"].shape[1:] != s.shape]
     if stale:
         raise SystemExit(f"{args.data} does not match today's observation ({stale} missing or a different size): "
-                         "rebuild it with scripts/build_demos.py")
+                         "rebuild it with scripts/warm_start/build_demos.py")
     keys = list(space)
     obs = {k: z[f"obs_{k}"].astype(np.float32) for k in keys}
     act, ep = z["action"].astype(np.float32), z["episode"]
@@ -313,7 +313,7 @@ def main():
     (run / "bc_summary.json").write_text(json.dumps(summary, indent=2, default=float))
     print(f"\nselected epoch {best_epoch} ({args.select}): val loss {best_row.get('val_loss', np.nan):.3f} "
           f"(baseline {base_loss:.3f}), drive {best_row.get('drive_dist', np.nan):.0f} m -> {ckpt}")
-    print(f"drive it:  python scripts/evaluate.py --checkpoint {ckpt} --n-workers 4")
+    print(f"watch it:  python scripts/view.py live --checkpoint {ckpt}")
 
 
 if __name__ == "__main__":

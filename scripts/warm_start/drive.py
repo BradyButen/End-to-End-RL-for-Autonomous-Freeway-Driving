@@ -4,18 +4,17 @@
 Same env the RL trains in (map, 35-45 km/h traffic, ego car, episode cap, termination rules, reward, logging); only
 the ego's controls come from you. Real time (10 Hz).
 
-    python scripts/drive.py                          # eval seed 1000
-    python scripts/drive.py --seeds 1003 1027        # one episode per seed, back to back
-    python scripts/drive.py --reward my_reward       # drive under configs/my_reward.yaml instead of r5
-    python scripts/drive.py --controller xbox        # gamepad (or wheel); falls back to the keyboard
+    python scripts/warm_start/drive.py                          # eval seed 1000
+    python scripts/warm_start/drive.py --seeds 1003 1027        # one episode per seed, back to back
+    python scripts/warm_start/drive.py --reward my_reward       # drive under configs/my_reward.yaml instead of r5
+    python scripts/warm_start/drive.py --controller xbox        # gamepad (or wheel); falls back to the keyboard
 
 Keys: W throttle, S brake, A / D steer (click the window first). X = end the episode, M = text / trail on / off.
 Avoid T (MetaDrive's expert takeover), R (reset) and Esc (quits without saving).
 
-The text panel shows the return so far and each term's share, updated every 0.1 s. After each episode:
-runs/drive/<timestamp>/episodes/<id>.npz (full log) and <id>_reward.png (cumulative return and each term over time,
-reward per second, speed and lane), and the breakdown is printed. Re-score a drive under another reward without
-driving again:  python scripts/plot.py reward runs/drive/<ts>/episodes/<id>.npz --reward r5
+The text panel shows the return so far and each term's share, updated every 0.1 s. After each episode the
+return per reward term is printed and the full log is saved to runs/drive/<timestamp>/episodes/<id>.npz. To use a
+drive for the warm start, copy its .npz into data/human_demos/ and rebuild the clone (docs/GUIDE.md).
 """
 
 import argparse
@@ -41,7 +40,8 @@ def main():
 
     from handoff.config import load_config
     from handoff.env import make_env
-    from handoff.viz import Viewer, drive_episode, reward_report
+    from handoff.reward import TERMS
+    from handoff.viz import Viewer, drive_episode
 
     # M1's env (one control step per decision), with MetaDrive's keyboard / gamepad policy driving the ego
     cfg = load_config("m1", reward=args.reward, overrides=args.overrides)
@@ -59,12 +59,12 @@ def main():
         for seed in args.seeds:
             print(f"seed {seed}: drive! (W/S/A/D, X to end)")
             summ = drive_episode(env, idle, seed, "drive", viewer)
-            path, totals = reward_report(summ["log_file"], out, label=f"you ({args.reward})")
             print(f"seed {seed}: {summ['termination']} after {summ['sim_time']:.1f} s, "
                   f"mean {summ['mean_speed'] * 3.6:.1f} km/h, {summ['lane_changes']} lane changes")
-            for k, v in totals.items():
-                print(f"  {k:>12s}: {v:+9.2f}")
-            print(f"  plot: {path}")
+            for n in TERMS:
+                if summ[f"return_{n}"]:
+                    print(f"  {n:>12s}: {summ[f'return_{n}']:+9.2f}")
+            print(f"  {'return':>12s}: {summ['return']:+9.2f}\n  log: {summ['log_file']}")
     finally:
         env.close()
 

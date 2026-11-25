@@ -1,52 +1,42 @@
-# R5 (2026-11-23): get to the finish line as fast as possible, like an aggressive driver but not a stupid one.
-# Replaces r4_straight (batches 1-6a; in git history and in each old run's config.yaml). Raw terms:
-# src/handoff/reward.py. Prices below are per SECOND (control step 0.1 s: a weight of 0.1 per step = 1 per second).
+# Reward r5: get to the end of the road as fast as possible, like an aggressive but competent driver.
+# Raw terms: src/handoff/reward.py. Weights are per control step (0.1 s), so a weight of 0.1 = 1 per second.
 #
-# Fast driving earns, anything slower than 60 km/h costs; a crash costs more than any finish:
-#   progress    +0.5 /s at 80 km/h (0.0225 per m)        a little, for every metre down the road
+# Driving faster than 60 km/h earns reward, slower costs, and a crash costs more than any finish:
+#   progress    +0.5 /s at 80 km/h (0.0225 per m)         a little for every metre down the road
 #   speed       +4 /s x (v / 80 km/h)^2                   driving fast
-#   speed_gap   -42 /s x ((v - 80 km/h) / 80 km/h)^2      sets the break-even at 60 km/h; steepest at a standstill
+#   speed_gap   -42 /s x ((v - 80 km/h) / 80 km/h)^2      sets the break-even at 60 km/h; steepest when stopped
 #   => net per second:  80 km/h +4.5 | 70 +2.8 | 60 0 | 50 -4.0 | 45 -6.5 | 40 -9.3 | 35 -12.3 | 20 -23 | stopped -42
-#      Following 35-45 km/h traffic costs every second: the push to pass.
-#   success     +150                                      you still have to make it
-#   collision / off_road   -1200                          also an M3 gate stop (emergency_brake; gate off by default).
-#                                                         Must stay worse than the worst finish (stuck behind the 35 km/h
-#                                                         lane the whole route ~ -1120), or crashing on purpose pays
-#                                                         whenever the car is slow (it learned to leave the road within
-#                                                         5 s when every second cost and a crash was cheap)
-#   lane_keep   -1 /s x (offset / 1.75 m)^2               riding a lane line; a lane change ~0.7; centred is free
-#   heading     -9 /s per rad beyond 0.5 deg              slow weaving: +-0.5 m in lane for 100 s ~ -40
-#   steer_rate  -0.6 /s per m/s^2 of change per step      rapid oscillation / jitter (steering as lateral accel at the
-#                                                         current speed); a smooth lane change ~ -0.7
-#   headway     -5 /s x (1 - headway / 0.5 s)             tailgating closer than 0.5 s (11 m at 80 km/h) or cutting
-#                                                         in front of a car behind; -5 /s at contact
-#   time, lane_change: 0 (logged only).
+#      Following the 35-45 km/h traffic costs every second: the push to pass.
+#   success     +150                                      on reaching the end
+#   collision / off_road   -4000                          worse than the worst possible finish, so crashing on
+#                                                         purpose never pays
+#   lane_keep   -20 /s x (offset / 1.75 m)^2              distance from the lane centre; -20 /s on a lane line
+#   heading     -9 /s per rad beyond 0.5 deg              slow weaving
+#   steer_rate  -0.6 /s per m/s^2 of change per step      rapid steering oscillation (as lateral accel at the speed)
+#   headway     -5 /s x (1 - headway / 0.5 s)             tailgating closer than 0.5 s, or cutting in front of a car
+#   lane_change: 0 (logged only)
 #
-# Episode scores (~1 km route):
-#   finish at 80 km/h (~45 s):                 4.5 x 45   + 150              = ~ +350
-#   finish at 70 km/h (~51 s):                 2.8 x 51   + 150              = ~ +295
-#   finish at 60 km/h (~60 s):                 0          + 150              = ~ +150
-#   finish behind 45 km/h traffic (~80 s):     -6.5 x 80  + 150              = ~ -370
-#   finish behind the 35 km/h lane (~103 s):   -12.3 x 103 + 150             = ~ -1120
-#   crash:                                     -1200 + what was earned / paid before it
-#   crawl at 4 km/h to the timeout (150 s):    -38 x 150                     = ~ -5700
-# => crawl < crash < stuck behind traffic < 60 km/h < 80 km/h. Passing instead of following the 45 km/h lane
-#    (+720) pays while the crash risk it adds is below ~45 %: aggressive.
+# Rough episode scores on a ~1 km route (speed terms and the finish bonus only):
+#   finish at 80 km/h (~45 s)                  ~ +350
+#   finish at 60 km/h (~60 s)                  ~ +150
+#   finish behind 45 km/h traffic (~80 s)      ~ -370
+#   finish behind the 35 km/h lane (~103 s)    ~ -1120
+#   crash                                      -4000 + whatever was earned before it
+#   crawl at 4 km/h until the 150 s timeout    ~ -5700
 experiment:
   reward_variant: r5
 
 reward:
   name: r5
-  weights:                     # per control step (0.1 s); raw terms: src/handoff/reward.py
+  weights:                     # per control step (0.1 s)
     progress: 0.0225           # per m            -> +0.5 /s at 80 km/h
     speed: 0.4                 # x (v/v_max)^2    -> +4 /s at 80 km/h
-    speed_gap: 4.2             # x -(1 - v/v_max)^2  -> -42 /s at a standstill; break-even 60 km/h
+    speed_gap: 4.2             # x -(1 - v/v_max)^2  -> -42 /s when stopped; break-even with speed at 60 km/h
     success: 150.0
     collision: -4000.0
     off_road: -4000.0
-    lane_keep: 2.0             # x -(offset / half lane)^2  -> -1 /s on a lane line
+    lane_keep: 2.0             # x -(offset / half a lane)^2  -> -20 /s on a lane line
     heading: 0.9               # per rad of heading error beyond 0.5 deg
-    steer_rate: 0.06           # per m/s^2 change of the steering's lateral accel since the previous step
+    steer_rate: 0.06           # per m/s^2 change of the steering's lateral acceleration since the previous step
     headway: 0.5               # x -(1 - headway / 0.5 s)  -> -5 /s at contact
-    time: 0.0                  # logged only
-    lane_change: 0.0
+    lane_change: 0.0           # logged only (lane_changes metric)
